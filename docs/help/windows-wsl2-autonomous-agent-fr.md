@@ -120,6 +120,18 @@ openclaw config set model.fallbackName gemini-3.1-pro
 
 Adapter les IDs exacts aux noms disponibles dans votre version OpenClaw.
 
+## 7.1 Démarrage guidé côté Gateway (recommandé)
+
+Avant de finaliser WhatsApp en production, suivre le flux [Getting Started](/start/getting-started) pour valider la base Gateway:
+
+```bash
+openclaw onboard --install-daemon
+openclaw gateway status
+openclaw dashboard
+```
+
+Ce triplet confirme rapidement que le service tourne, que l'UI de contrôle répond et que l'environnement WSL2 est prêt pour l'ajout du canal WhatsApp.
+
 ### Souscriptions LLM recommandées (admin)
 
 - **OpenAI Codex 5.3**: vérifier que le compte administrateur possède une souscription active et les droits API/outils pour le modèle `codex-5.3`.
@@ -153,7 +165,10 @@ Fichier: `~/.openclaw/openclaw.json`
   "channels": {
     "whatsapp": {
       "enabled": true,
-      "allowlist": ["+33600000001", "+33600000002"],
+      "dmPolicy": "pairing",
+      "allowFrom": ["+33600000001", "+33600000002"],
+      "groupPolicy": "allowlist",
+      "groupAllowFrom": ["+33600000001"],
       "adminIdentity": "+33600000001"
     }
   },
@@ -228,11 +243,40 @@ Fichier: `~/.openclaw/openclaw.json`
 
 ### Points clés de sécurité
 
-- `allowlist` WhatsApp stricte.
+- `dmPolicy: pairing` pour imposer une approbation initiale des nouveaux expéditeurs.
+- `allowFrom` et `groupAllowFrom` limitent qui peut déclencher des actions en DM et en groupes.
+- `groupPolicy: allowlist` garde les groupes fermés par défaut.
 - `adminIdentity` unique.
 - Marketplace et skills externes désactivés.
 - Écritures limitées à `~/assistant/*`.
 - Actions externes bloquées sans validation explicite.
+
+### 8.1 Opérations WhatsApp essentielles (QR, pairing, diagnostic)
+
+Après avoir appliqué la configuration, réaliser la séquence opérationnelle suivante:
+
+```bash
+openclaw channels login --channel whatsapp
+openclaw channels status --probe
+```
+
+1. `openclaw channels login --channel whatsapp` ouvre le flux de liaison (QR WhatsApp Web).
+2. `openclaw channels status --probe` vérifie la santé du canal (socket/auth).
+
+Si `dmPolicy` est sur `pairing`, approuver la première demande:
+
+```bash
+openclaw pairing list whatsapp
+openclaw pairing approve whatsapp <CODE>
+```
+
+Enfin, test de bout en bout depuis la CLI:
+
+```bash
+openclaw message send --channel whatsapp --target +33600000001 --message "Test WSL2 OK"
+```
+
+Recommandation pratique: si possible, utiliser un numéro WhatsApp dédié à l'agent plutôt qu'un numéro personnel, pour clarifier l'allowlist, le routage et l'audit.
 
 ## 9. Service systemd OpenClaw
 
