@@ -120,6 +120,22 @@ openclaw config set model.fallbackName gemini-3.1-pro
 
 Adapter les IDs exacts aux noms disponibles dans votre version OpenClaw.
 
+### Souscriptions LLM recommandées (admin)
+
+- **OpenAI Codex 5.3**: vérifier que le compte administrateur possède une souscription active et les droits API/outils pour le modèle `codex-5.3`.
+- **Gemini Pro 3.1**: vérifier que le compte administrateur possède une souscription active et l'accès au modèle `gemini-3.1-pro`.
+- Si les comptes sont gérés par une équipe/tenant entreprise, l'administrateur devra probablement intervenir pour accorder les scopes, quotas et politiques d'usage.
+
+Vérification rapide suggérée:
+
+```bash
+openclaw models list
+openclaw config get model.provider
+openclaw config get model.name
+openclaw config get model.fallbackProvider
+openclaw config get model.fallbackName
+```
+
 ## 8. Configuration OpenClaw sécurisée
 
 Fichier: `~/.openclaw/openclaw.json`
@@ -262,7 +278,26 @@ sudo loginctl enable-linger "$USER"
 
 ## 10. Configuration memU opérationnelle
 
-Créer l'arborescence mémoire:
+Installer memU avant l'initialisation des répertoires:
+
+```bash
+python3 -m venv ~/assistant/.venv-memu
+source ~/assistant/.venv-memu/bin/activate
+pip install --upgrade pip
+pip install git+https://github.com/NevaMind-AI/memU.git
+python -c "import memu; print('memU OK')"
+deactivate
+```
+
+Alternative pour figer une version (recommandé en prod):
+
+```bash
+source ~/assistant/.venv-memu/bin/activate
+pip install git+https://github.com/NevaMind-AI/memU.git@<commit-ou-tag>
+deactivate
+```
+
+Ensuite créer l'arborescence mémoire:
 
 ```bash
 mkdir -p ~/assistant/state/memu/{identity,decisions,optimizations,errors,summaries}
@@ -279,6 +314,15 @@ cat > ~/assistant/state/memu/identity/admin-principles.md <<'EOMEM'
 - Curiosité autorisée mais disciplinée
 EOMEM
 ```
+
+### Intégration OpenClaw x memU: validation pragmatique
+
+Cette architecture est cohérente, mais l'intégration exacte dépend de votre version OpenClaw et du mode d'intégration memU (fichiers, wrapper local, ou plugin). Avant passage en production, valider au minimum:
+
+1. **Écriture réelle**: lancer une tâche, puis vérifier que `~/assistant/state/memu/*` reçoit bien des entrées.
+2. **Lecture mémoire**: soumettre une question dépendante d'un contexte passé et vérifier la restitution.
+3. **Fallback sain**: en cas d'indisponibilité memU, l'agent continue en mode dégradé sans action externe non validée.
+4. **Audit**: journaliser les appels mémoire dans `~/assistant/logs/audit.log`.
 
 ## 11. Cron jobs discipline et maintenance
 
