@@ -1311,7 +1311,12 @@
             "groups": [
               {
                 "group": "Help",
-                "pages": ["help/index", "help/troubleshooting", "help/faq"]
+                "pages": [
+                  "help/index",
+                  "help/troubleshooting",
+                  "help/faq",
+                  "help/windows-wsl2-autonomous-agent-fr"
+                ]
               },
               {
                 "group": "Community",
