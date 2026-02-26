@@ -641,3 +641,250 @@ Checklist:
 - Sauvegarder `~/assistant/state` et `~/.openclaw` quotidiennement.
 
 Ce setup donne un agent autonome avancé, discipliné et contrôlable, sans Docker, adapté à WSL2.
+
+## 19. Procédure opératoire complète sans étape implicite
+
+Cette section reformule la procédure en mode check-list débutant. Exécuter les blocs dans l'ordre exact.
+
+### 1) Objectif exact
+
+Obtenir un environnement Windows 11 Pro + Ubuntu WSL2 où:
+
+- `systemd` est actif dans WSL2 (PID 1).
+- OpenClaw tourne en service utilisateur persistant.
+- WhatsApp est relié et contrôlé par allowlist/pairing.
+- memU est installé et exploitable.
+- Les logs, scripts de maintenance et contrôles de santé sont en place.
+
+### 2) Ce qui doit déjà exister
+
+Avant de commencer, vérifier ces préconditions:
+
+1. Vous avez un compte Windows avec droits administrateur.
+2. Vous avez une connexion Internet stable.
+3. Vous avez un compte OpenAI + un compte Gemini (si vous gardez ces providers).
+4. Vous avez un numéro WhatsApp admin et, idéalement, un numéro dédié agent.
+5. Vous connaissez votre utilisateur Linux WSL (exemple: `alex`) pour remplacer `<user>` dans les chemins.
+
+### 3) Ce que vous devez modifier (fichiers précis)
+
+1. `/etc/wsl.conf` (dans Ubuntu WSL) pour activer systemd.
+2. `~/.openclaw/openclaw.json` (config OpenClaw complète, remplacer `<user>` et numéros fictifs).
+3. `~/.config/systemd/user/openclaw-gateway.service` (service systemd user).
+4. `~/assistant/state/memu/identity/admin-principles.md` (bootstrap mémoire).
+5. `~/assistant/core/*.sh` (scripts de maintenance: veille, compaction, rapport tokens).
+6. Crontab utilisateur (via `crontab -l` / `crontab /tmp/mycron`).
+
+### 4) Commandes exactes à exécuter
+
+#### 4.1 Windows PowerShell (Administrateur)
+
+```powershell
+wsl --install -d Ubuntu
+wsl --set-default-version 2
+wsl --update
+```
+
+Redémarrage obligatoire: redémarrer Windows pour terminer l'activation WSL.
+
+#### 4.2 Ubuntu WSL (premier démarrage)
+
+```bash
+uname -a
+wsl.exe --status
+```
+
+#### 4.3 Activer systemd
+
+Dans Ubuntu:
+
+```bash
+sudo tee /etc/wsl.conf >/dev/null <<'EOWSLCONF'
+[boot]
+systemd=true
+EOWSLCONF
+```
+
+Dans PowerShell:
+
+```powershell
+wsl --shutdown
+```
+
+Redémarrage obligatoire: relancer Ubuntu pour rebooter l'instance WSL avec `systemd=true`.
+
+Vérification immédiate:
+
+```bash
+systemctl is-system-running
+ps -p 1 -o comm=
+```
+
+#### 4.4 Installer base système + runtimes
+
+```bash
+sudo apt update
+sudo apt upgrade -y
+sudo apt install -y curl git jq ca-certificates build-essential python3 python3-venv python3-pip cron ripgrep
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs
+node -v
+npm -v
+sudo npm install -g pnpm
+pnpm -v
+```
+
+#### 4.5 Installer OpenClaw + arborescence contrôlée
+
+```bash
+sudo npm install -g openclaw@latest
+openclaw --version
+mkdir -p ~/assistant/{core,skills/staging,skills/enabled,sandbox,logs,state,feeds}
+chmod 700 ~/assistant ~/assistant/state ~/assistant/logs ~/assistant/sandbox
+chmod 750 ~/assistant/skills ~/assistant/skills/enabled ~/assistant/skills/staging
+```
+
+#### 4.6 Authentifier providers + config modèles
+
+```bash
+openclaw login
+openclaw config set model.provider openai
+openclaw config set model.name codex-5.3
+openclaw config set model.fallbackProvider gemini
+openclaw config set model.fallbackName gemini-3.1-pro
+openclaw models list
+openclaw config get model.provider
+openclaw config get model.name
+openclaw config get model.fallbackProvider
+openclaw config get model.fallbackName
+```
+
+#### 4.7 Installer et valider memU
+
+```bash
+python3 -m venv ~/assistant/.venv-memu
+source ~/assistant/.venv-memu/bin/activate
+pip install --upgrade pip
+pip install git+https://github.com/NevaMind-AI/memU.git
+python -c "import memu; print('memU OK')"
+deactivate
+mkdir -p ~/assistant/state/memu/{identity,decisions,optimizations,errors,summaries}
+```
+
+#### 4.8 Activer le service OpenClaw via systemd
+
+Créer le fichier `~/.config/systemd/user/openclaw-gateway.service` avec le contenu de la section 9, puis:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now openclaw-gateway.service
+systemctl --user status openclaw-gateway.service --no-pager
+sudo loginctl enable-linger "$USER"
+```
+
+Redémarrage recommandé: fermer/réouvrir session WSL puis revérifier `systemctl --user status ...`.
+
+#### 4.9 Connecter WhatsApp et tester de bout en bout
+
+```bash
+openclaw channels login --channel whatsapp
+openclaw channels status --probe
+openclaw pairing list whatsapp
+openclaw pairing approve whatsapp <CODE>
+openclaw message send --channel whatsapp --target +33600000001 --message "Test WSL2 OK"
+```
+
+#### 4.10 Installer les cron jobs de maintenance
+
+```bash
+crontab -l 2>/dev/null > /tmp/mycron || true
+cat >> /tmp/mycron <<'EOCRON'
+# Veille quotidienne une fois par jour
+15 8 * * * /home/<user>/assistant/core/research-daily.sh >> /home/<user>/assistant/logs/research.log 2>&1
+
+# Compression memoire quotidienne
+30 8 * * * /home/<user>/assistant/core/memory-compact.sh >> /home/<user>/assistant/logs/memory.log 2>&1
+
+# Digest hebdo dimanche
+0 9 * * 0 /home/<user>/assistant/core/weekly-digest.sh >> /home/<user>/assistant/logs/digest.log 2>&1
+
+# Rapport tokens hebdo
+30 9 * * 0 /home/<user>/assistant/core/tokens-weekly-report.sh >> /home/<user>/assistant/logs/tokens.log 2>&1
+EOCRON
+crontab /tmp/mycron
+rm -f /tmp/mycron
+crontab -l
+```
+
+### 5) Ce que vous devez voir si tout va bien
+
+- `ps -p 1 -o comm=` affiche `systemd`.
+- `systemctl --user status openclaw-gateway.service` affiche `active (running)`.
+- `openclaw channels status --probe` retourne un état sain pour WhatsApp.
+- `ss -ltnp | rg 18789` montre une écoute locale sur `127.0.0.1:18789`.
+- `python -c "import memu; ..."` affiche `memU OK`.
+- `crontab -l` contient bien les tâches planifiées.
+
+### 6) Erreurs possibles et diagnostic
+
+1. `systemctl` échoue dans WSL:
+   - Vérifier `/etc/wsl.conf`.
+   - Exécuter `wsl --shutdown`, relancer Ubuntu, revérifier PID 1.
+
+2. Service OpenClaw en `failed`:
+   - `systemctl --user status openclaw-gateway.service --no-pager`
+   - `tail -n 120 ~/assistant/logs/gateway.err.log`
+   - vérifier `openclaw --version` et PATH.
+
+3. WhatsApp non authentifié:
+   - relancer `openclaw channels login --channel whatsapp`.
+   - rescanner le QR, puis `openclaw channels status --probe`.
+
+4. memU import impossible:
+   - réactiver le venv, réinstaller memU, retester import.
+
+5. Cron n'exécute rien:
+   - vérifier `crontab -l`, permissions `chmod +x ~/assistant/core/*.sh`, chemins `/home/<user>/...`.
+
+### 7) Revenir en arrière si ça casse
+
+Rollback minimal recommandé:
+
+1. Sauvegarder avant modification:
+
+```bash
+mkdir -p ~/assistant/state/backups
+cp ~/.openclaw/openclaw.json ~/assistant/state/backups/openclaw.json.$(date +%F-%H%M%S)
+```
+
+2. Restaurer une config antérieure si incident:
+
+```bash
+cp ~/assistant/state/backups/openclaw.json.<horodatage> ~/.openclaw/openclaw.json
+systemctl --user restart openclaw-gateway.service
+```
+
+3. En cas d'échec d'un skill promu, restaurer le backup via le script de rollback de la section 14.
+
+4. En cas de panne memU, revenir temporairement en mode dégradé (sans action externe non validée) jusqu'à correction.
+
+### 8) Vérifier que c'est réellement fonctionnel
+
+Effectuer un test de persistance réel:
+
+1. Redémarrer Windows.
+2. Ouvrir Ubuntu WSL.
+3. Exécuter:
+
+```bash
+systemctl --user is-active openclaw-gateway.service
+openclaw channels status --probe
+ss -ltnp | rg 18789
+tail -n 120 ~/assistant/logs/gateway.log
+crontab -l
+```
+
+4. Envoyer un message WhatsApp depuis un numéro autorisé.
+5. Vérifier la réponse agent + la présence de traces dans logs/audit + mises à jour dans `~/assistant/state/memu/*`.
+
+Validation finale: si ces 5 points sont bons après redémarrage complet, l'installation est opérationnelle.
