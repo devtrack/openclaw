@@ -372,6 +372,16 @@ Cette architecture est cohérente, mais l'intégration exacte dépend de votre v
 
 Installer crontab utilisateur:
 
+Le bloc ci-dessous contient **5 commandes shell**:
+
+1. `crontab -l ...`
+2. `cat >> /tmp/mycron <<'EOCRON'` (commande here-doc)
+3. `crontab /tmp/mycron`
+4. `rm -f /tmp/mycron`
+5. `crontab -l`
+
+Important: la commande `cat ... <<'EOCRON'` se lance en **une seule fois**. Après avoir validé cette ligne, collez le contenu cron brut, puis terminez avec `EOCRON` seul sur sa ligne. N'ajoutez pas de `\\n` littéraux.
+
 ```bash
 crontab -l 2>/dev/null > /tmp/mycron || true
 cat >> /tmp/mycron <<'EOCRON'
@@ -795,6 +805,8 @@ openclaw message send --channel whatsapp --target +33600000001 --message "Test W
 ```
 
 #### 4.10 Installer les cron jobs de maintenance
+
+Même principe ici: exécuter le bloc tel quel, et traiter `cat >> /tmp/mycron <<'EOCRON'` comme une commande multi-ligne unique terminée par `EOCRON`.
 
 ```bash
 crontab -l 2>/dev/null > /tmp/mycron || true
