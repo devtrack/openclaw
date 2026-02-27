@@ -1,30 +1,68 @@
 ---
-summary: "Guide production pour OpenClaw autonome sur Windows 11 Pro avec WSL2 Ubuntu sans Docker"
+summary: "Guide V2 sécurisé pour déployer OpenClaw sur Windows 11 + WSL2 en mode WhatsApp-first avec un seul runtime et un staging contrôlé"
 read_when:
-  - Vous voulez un agent autonome discipliné avec OpenClaw sur WSL2
-  - Vous cherchez une architecture sécurisée avec WhatsApp, memU et budgets tokens
-  - Vous avez besoin d'un workflow auto-amélioration avec validation admin
-title: "Windows 11 Pro plus WSL2 Ubuntu pour agent autonome discipliné"
+  - Vous voulez piloter OpenClaw uniquement via WhatsApp
+  - Vous voulez une architecture autonome mais sous contrôle admin strict
+  - Vous voulez durcir runtime, staging et audit sur une home box
+title: "OpenClaw V2 sécurisé sur Windows + WSL2 (WhatsApp-first)"
 ---
 
-# Guide complet OpenClaw sur Windows 11 Pro avec WSL2 sans Docker
+# OpenClaw V2 sécurisé sur Windows 11 + WSL2 (WhatsApp-first)
 
-Ce guide décrit une architecture production-ready pour un agent autonome avancé avec OpenClaw sur Windows 11 Pro, Ubuntu WSL2 et systemd activé, sans Docker.
+Ce guide installe **une seule instance OpenClaw** (service `systemd --user`) sur WSL2.
 
-## 1. Architecture cible
+- **Admin (vous)** = décideur final.
+- **IA** = opérateur en staging + exécution runtime **uniquement après approbation explicite WhatsApp**.
+- **Aucune action externe sensible** (mail, paiement, appel API critique, commandes de production) sans validation admin.
 
-- Orchestrateur: OpenClaw.
-- OS hôte: Windows 11 Pro.
-- Runtime Linux: Ubuntu sous WSL2 avec systemd.
-- Transport principal: WhatsApp.
-- Mémoire longue durée: memU.
-- Modèles: souscriptions officielles OpenAI Codex et Gemini.
-- Politique skills: uniquement local (`~/assistant/skills/enabled`), marketplace interdit.
-- Sécurité: écriture locale contrôlée et actions externes sous validation admin.
+---
 
-## 2. Pré-requis Windows 11 Pro
+## 1) Principe central : un seul OpenClaw (runtime verrouillé) + staging opéré par l’IA
 
-Ouvrir un terminal PowerShell en administrateur et exécuter:
+```text
+                        WhatsApp (canal unique)
+                                 |
+               +-----------------+-----------------+
+               |                                   |
+       user commands                       admin commands
+   (lecture / questions)           (/approve, /reject, CONFIRM)
+               |                                   |
+               +-----------------+-----------------+
+                                 |
+                         OpenClaw Runtime
+                 (UNIQUE service systemd actif 24/7)
+                                 |
+                 +---------------+----------------+
+                 |                                |
+         lecture contrôlée                  exécution contrôlée
+   (runtime/workspaces/logs/approved)   (UNIQUE runner: run_safe.sh)
+                 |
+      +----------+----------------------------------------------+
+      |                                                         |
+ staging (scripts + dossiers, pas un service OpenClaw)   quarantine/approved
+      |                                                         |
+ fetch -> scan -> rapport -> demande approbation -> promote ----+
+                     (admin WhatsApp décide)
+```
+
+### Arborescence standard
+
+```bash
+mkdir -p ~/assistant/{runtime,staging,quarantine,approved,logs,workspaces,core}
+mkdir -p ~/assistant/staging/{reports,proposals,tmp}
+mkdir -p ~/.openclaw
+chmod 700 ~/assistant ~/.openclaw
+chmod 700 ~/assistant/{runtime,staging,quarantine,approved,logs,workspaces,core}
+chmod 700 ~/assistant/staging/{reports,proposals,tmp}
+```
+
+> **Important**: `staging` est un espace de travail (fichiers/scripts), **pas un second OpenClaw**.
+
+---
+
+## 2) Installation Windows + WSL2 (base)
+
+### 2.1 Côté Windows (PowerShell admin)
 
 ```powershell
 wsl --install -d Ubuntu
@@ -32,27 +70,18 @@ wsl --set-default-version 2
 wsl --update
 ```
 
-Redémarrer Windows, puis lancer Ubuntu une première fois.
+Redémarrer Windows puis lancer Ubuntu.
 
-Vérifier côté Ubuntu:
-
-```bash
-uname -a
-wsl.exe --status
-```
-
-## 3. Activer systemd dans WSL2
-
-Dans Ubuntu:
+### 2.2 Activer systemd dans WSL2
 
 ```bash
-sudo tee /etc/wsl.conf >/dev/null <<'EOWSLCONF'
+sudo tee /etc/wsl.conf >/dev/null <<'EOWSL'
 [boot]
 systemd=true
-EOWSLCONF
+EOWSL
 ```
 
-Depuis PowerShell Windows:
+Depuis PowerShell:
 
 ```powershell
 wsl --shutdown
@@ -61,232 +90,419 @@ wsl --shutdown
 Relancer Ubuntu et vérifier:
 
 ```bash
-systemctl is-system-running
 ps -p 1 -o comm=
+systemctl is-system-running || true
 ```
 
-Résultat attendu: PID 1 = `systemd`.
-
-## 4. Base système Ubuntu
+### 2.3 Paquets requis
 
 ```bash
 sudo apt update
 sudo apt upgrade -y
-sudo apt install -y curl git jq ca-certificates build-essential python3 python3-venv python3-pip cron ripgrep
+sudo apt install -y curl wget ca-certificates jq ripgrep git logrotate coreutils findutils
 ```
 
-## 5. Installer Node 22 et pnpm
+### 2.4 Node 22 + OpenClaw
 
 ```bash
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs
-node -v
-npm -v
-sudo npm install -g pnpm
-pnpm -v
-```
-
-## 6. Installer OpenClaw globalement
-
-```bash
 sudo npm install -g openclaw@latest
+node -v
 openclaw --version
 ```
 
-Créer la hiérarchie contrôlée:
+---
 
-```bash
-mkdir -p ~/assistant/{core,skills/staging,skills/enabled,sandbox,logs,state,feeds}
-chmod 700 ~/assistant ~/assistant/state ~/assistant/logs ~/assistant/sandbox
-chmod 750 ~/assistant/skills ~/assistant/skills/enabled ~/assistant/skills/staging
-```
+## 3) Configuration OpenClaw (WhatsApp-only, séparation logique user/admin)
 
-## 7. Authentification providers par login officiel
-
-Utiliser les flux de login supportés par OpenClaw sans stocker de clés en clair dans des fichiers partagés:
+1. Login:
 
 ```bash
 openclaw login
 ```
 
-Puis configurer les providers et modèles par défaut:
+2. Config de base:
 
 ```bash
-openclaw config set model.provider openai
-openclaw config set model.name codex-5.3
-openclaw config set model.fallbackProvider gemini
-openclaw config set model.fallbackName gemini-3.1-pro
+openclaw config set gateway.mode local
+openclaw config set gateway.bind loopback
+openclaw config set gateway.port 18789
+openclaw config set routing.defaultChannel whatsapp
 ```
 
-Adapter les IDs exacts aux noms disponibles dans votre version OpenClaw.
+3. Principes de sécurité à appliquer dans votre config OpenClaw:
 
-## 7.1 Démarrage guidé côté Gateway (recommandé)
+- Canal unique: `whatsapp`.
+- Allowlist stricte des numéros admin (ex: `+33...`).
+- Séparation logique:
+  - **user commands**: lecture, questions, synthèse.
+  - **admin commands**: approbation/rejet/changements runtime.
+- Double confirmation pour actions sensibles:
+  - `/approve <id>`
+  - `CONFIRM <id>`
+- Journaliser toute validation/rejet dans `~/assistant/logs/audit.log`.
 
-Avant de finaliser WhatsApp en production, suivre le flux [Getting Started](/start/getting-started) pour valider la base Gateway:
-
-```bash
-openclaw onboard --install-daemon
-openclaw gateway status
-openclaw dashboard
-```
-
-Ce triplet confirme rapidement que le service tourne, que l'UI de contrôle répond et que l'environnement WSL2 est prêt pour l'ajout du canal WhatsApp.
-
-### Souscriptions LLM recommandées (admin)
-
-- **OpenAI Codex 5.3**: vérifier que le compte administrateur possède une souscription active et les droits API/outils pour le modèle `codex-5.3`.
-- **Gemini Pro 3.1**: vérifier que le compte administrateur possède une souscription active et l'accès au modèle `gemini-3.1-pro`.
-- Si les comptes sont gérés par une équipe/tenant entreprise, l'administrateur devra probablement intervenir pour accorder les scopes, quotas et politiques d'usage.
-
-Vérification rapide suggérée:
-
-```bash
-openclaw models list
-openclaw config get model.provider
-openclaw config get model.name
-openclaw config get model.fallbackProvider
-openclaw config get model.fallbackName
-```
-
-## 8. Configuration OpenClaw sécurisée
-
-Fichier: `~/.openclaw/openclaw.json`
-
-```json
-{
-  "gateway": {
-    "mode": "local",
-    "bind": "loopback",
-    "port": 18789
-  },
-  "routing": {
-    "defaultChannel": "whatsapp"
-  },
-  "channels": {
-    "whatsapp": {
-      "enabled": true,
-      "dmPolicy": "pairing",
-      "allowFrom": ["+33600000001", "+33600000002"],
-      "groupPolicy": "allowlist",
-      "groupAllowFrom": ["+33600000001"],
-      "adminIdentity": "+33600000001"
-    }
-  },
-  "skills": {
-    "marketplace": {
-      "enabled": false
-    },
-    "external": {
-      "enabled": false
-    },
-    "local": {
-      "enabled": true,
-      "paths": ["/home/<user>/assistant/skills/enabled"],
-      "stagingPath": "/home/<user>/assistant/skills/staging",
-      "allowWrites": [
-        "/home/<user>/assistant/skills",
-        "/home/<user>/assistant/logs",
-        "/home/<user>/assistant/state"
-      ]
-    }
-  },
-  "memory": {
-    "provider": "memu",
-    "path": "/home/<user>/assistant/state/memu",
-    "compaction": {
-      "enabled": true,
-      "maxItems": 20000,
-      "summaryIntervalHours": 24
-    }
-  },
-  "security": {
-    "requireAdminApprovalForExternalActions": true,
-    "commandAllowlist": [
-      "pwd",
-      "ls",
-      "cat",
-      "jq",
-      "rg",
-      "diff",
-      "git status",
-      "git diff",
-      "python3",
-      "node",
-      "openclaw"
-    ],
-    "denyNetworkCodeDownload": true,
-    "auditLogPath": "/home/<user>/assistant/logs/audit.log"
-  },
-  "agent": {
-    "primaryAdmin": {
-      "id": "+33600000001",
-      "name": "admin-principal"
-    },
-    "externalActionPolicy": "ask-admin-explicitly",
-    "dailyResearch": {
-      "maxSessions": 1,
-      "maxNotifications": 1,
-      "weeklyDigestDay": "sunday"
-    }
-  },
-  "tokens": {
-    "dailyBudget": 1200000,
-    "perTaskBudget": 120000,
-    "roiThreshold": 1.2,
-    "cache": {
-      "enabled": true,
-      "path": "/home/<user>/assistant/state/cache"
-    }
-  }
-}
-```
-
-### Points clés de sécurité
-
-- `dmPolicy: pairing` pour imposer une approbation initiale des nouveaux expéditeurs.
-- `allowFrom` et `groupAllowFrom` limitent qui peut déclencher des actions en DM et en groupes.
-- `groupPolicy: allowlist` garde les groupes fermés par défaut.
-- `adminIdentity` unique.
-- Marketplace et skills externes désactivés.
-- Écritures limitées à `~/assistant/*`.
-- Actions externes bloquées sans validation explicite.
-
-### 8.1 Opérations WhatsApp essentielles (QR, pairing, diagnostic)
-
-Après avoir appliqué la configuration, réaliser la séquence opérationnelle suivante:
+4. Pairing + statut WhatsApp:
 
 ```bash
 openclaw channels login --channel whatsapp
 openclaw channels status --probe
 ```
 
-1. `openclaw channels login --channel whatsapp` ouvre le flux de liaison (QR WhatsApp Web).
-2. `openclaw channels status --probe` vérifie la santé du canal (socket/auth).
+---
 
-Si `dmPolicy` est sur `pairing`, approuver la première demande:
+## 4) Safe Runner / Command Executor (allowlist = 1 exécutable)
+
+Le runtime ne doit exécuter **qu’un seul binaire/script**: `~/assistant/core/run_safe.sh`.
+
+### 4.1 Script complet `~/assistant/core/run_safe.sh`
 
 ```bash
-openclaw pairing list whatsapp
-openclaw pairing approve whatsapp <CODE>
+#!/usr/bin/env bash
+set -euo pipefail
+
+# run_safe.sh
+# Exécuteur contrôlé pour OpenClaw runtime.
+# - Refus par défaut.
+# - Bloque opérateurs shell dangereux.
+# - Autorise seulement une liste réduite de commandes/sous-commandes.
+# - Limite les chemins accessibles.
+# - Timeout court.
+# - Audit append-only best-effort.
+
+BASE="$HOME/assistant"
+AUDIT_LOG="$BASE/logs/audit.log"
+
+mkdir -p "$BASE/logs"
+touch "$AUDIT_LOG"
+chmod 600 "$AUDIT_LOG"
+
+# Best-effort append-only. Sous WSL2, chattr peut être indisponible.
+if command -v chattr >/dev/null 2>&1; then
+  chattr +a "$AUDIT_LOG" 2>/dev/null || true
+fi
+
+usage() {
+  echo "Usage: $0 <cmd> [arg1 ...]"
+  exit 2
+}
+
+log_event() {
+  # format: date|pid|status|message
+  printf '%s|pid=%s|%s|%s\n' "$(date -Is)" "$$" "$1" "$2" >> "$AUDIT_LOG"
+}
+
+is_allowed_path() {
+  local p
+  p="$(realpath -m "$1")"
+  case "$p" in
+    "$BASE/runtime"/*|"$BASE/workspaces"/*|"$BASE/logs"/*|"$BASE/approved"/*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+contains_forbidden_tokens() {
+  local joined="$*"
+  # Interdits stricts: |, >, >>, ;, &&, ||, $(), backticks
+  [[ "$joined" == *"|"* ]] && return 0
+  [[ "$joined" == *">>"* ]] && return 0
+  [[ "$joined" == *">"* ]] && return 0
+  [[ "$joined" == *";"* ]] && return 0
+  [[ "$joined" == *"&&"* ]] && return 0
+  [[ "$joined" == *"||"* ]] && return 0
+  [[ "$joined" == *'$('* ]] && return 0
+  [[ "$joined" == *'`'* ]] && return 0
+  return 1
+}
+
+[[ $# -ge 1 ]] || usage
+
+if contains_forbidden_tokens "$@"; then
+  log_event "DENY" "forbidden token in: $*"
+  echo "DENY: forbidden shell operator"
+  exit 126
+fi
+
+cmd="$1"
+shift || true
+
+# Timeout par défaut: 20s (dans plage 10–30s)
+TIMEOUT_BIN="timeout"
+TIMEOUT_SEC="20s"
+
+# Commandes autorisées (lecture / diagnostic)
+case "$cmd" in
+  git)
+    sub="${1:-}"
+    case "$sub" in
+      status|diff)
+        ;;
+      *)
+        log_event "DENY" "git subcommand forbidden: ${sub:-<none>}"
+        echo "DENY: only git status|diff"
+        exit 126
+        ;;
+    esac
+    ;;
+  rg|jq|cat|head|tail|sed|awk|ls|pwd)
+    ;;
+  # Tests autorisés uniquement dans ~/assistant/workspaces/
+  pytest|ctest|dotnet)
+    if [[ "$cmd" == "dotnet" && "${1:-}" != "test" ]]; then
+      log_event "DENY" "dotnet subcommand forbidden"
+      echo "DENY: only dotnet test"
+      exit 126
+    fi
+    ;;
+  *)
+    log_event "DENY" "command forbidden: $cmd"
+    echo "DENY: command not allowed"
+    exit 126
+    ;;
+esac
+
+# Validation stricte des arguments ressemblant à des chemins
+for a in "$@"; do
+  case "$a" in
+    /*|~/*|./*|../*|*/*)
+      if ! is_allowed_path "$a"; then
+        log_event "DENY" "path forbidden: $a"
+        echo "DENY: path outside approved roots"
+        exit 126
+      fi
+      ;;
+  esac
+done
+
+# Pour les tests, forcer exécution dans workspaces
+if [[ "$cmd" == "pytest" || "$cmd" == "ctest" || "$cmd" == "dotnet" ]]; then
+  cwd="$(pwd)"
+  if ! is_allowed_path "$cwd" || [[ "$(realpath -m "$cwd")" != "$BASE/workspaces"* ]]; then
+    log_event "DENY" "tests allowed only in $BASE/workspaces"
+    echo "DENY: tests only allowed inside ~/assistant/workspaces"
+    exit 126
+  fi
+fi
+
+log_event "ALLOW" "$cmd $*"
+exec "$TIMEOUT_BIN" "$TIMEOUT_SEC" "$cmd" "$@"
 ```
 
-Enfin, test de bout en bout depuis la CLI:
+Activation:
 
 ```bash
-openclaw message send --channel whatsapp --target +33600000001 --message "Test WSL2 OK"
+chmod 700 ~/assistant/core/run_safe.sh
 ```
 
-Recommandation pratique: si possible, utiliser un numéro WhatsApp dédié à l'agent plutôt qu'un numéro personnel, pour clarifier l'allowlist, le routage et l'audit.
+### 4.2 Règle OpenClaw
 
-## 9. Service systemd OpenClaw
+Le composant d’exécution doit pointer **uniquement** vers:
 
-Créer l'unité utilisateur:
+```text
+/home/<user>/assistant/core/run_safe.sh
+```
+
+Aucune autre commande directe autorisée.
+
+---
+
+## 5) Code externe : quarantine -> scan -> promote (sans service parallèle)
+
+### 5.1 Script `~/assistant/core/fetch_to_quarantine.sh`
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cat > ~/.config/systemd/user/openclaw-gateway.service <<'EOSERVICE'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Usage:
+#   fetch_to_quarantine.sh <source_url_or_git> <name>
+
+SRC="${1:?source required}"
+NAME="${2:?name required}"
+BASE="$HOME/assistant"
+QROOT="$BASE/quarantine"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+DEST="$QROOT/${NAME}-${STAMP}"
+
+mkdir -p "$QROOT" "$BASE/logs"
+chmod 700 "$QROOT"
+
+if [[ "$SRC" =~ ^https?:// ]]; then
+  mkdir -p "$DEST"
+  FILE="$DEST/source.bin"
+  curl -fL --retry 3 --connect-timeout 10 -o "$FILE" "$SRC"
+elif [[ "$SRC" =~ ^git@|^https://.*\.git$ ]]; then
+  git clone --depth 1 "$SRC" "$DEST"
+else
+  echo "Unsupported source: use http(s) URL or git URL"
+  exit 2
+fi
+
+sha256sum $(find "$DEST" -type f | sort) > "$DEST/SHA256SUMS"
+
+echo "source=$SRC" > "$DEST/FETCH.meta"
+echo "fetched_at=$(date -Is)" >> "$DEST/FETCH.meta"
+echo "dest=$DEST" >> "$DEST/FETCH.meta"
+
+echo "OK: $DEST"
+```
+
+### 5.2 Script `~/assistant/core/scan_quarantine.sh`
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Usage:
+#   scan_quarantine.sh <quarantine_dir>
+
+TARGET="${1:?quarantine dir required}"
+BASE="$HOME/assistant"
+REPORT_DIR="$BASE/staging/reports"
+mkdir -p "$REPORT_DIR"
+REPORT="$REPORT_DIR/scan-$(basename "$TARGET")-$(date +%Y%m%d-%H%M%S).md"
+
+[[ -d "$TARGET" ]] || { echo "Missing dir: $TARGET"; exit 2; }
+
+{
+  echo "# Rapport scan quarantine"
+  echo
+  echo "- Cible: $TARGET"
+  echo "- Date: $(date -Is)"
+  echo
+  echo "## Résumé"
+  echo "Scan statique minimal (heuristique) avant toute promotion."
+  echo
+
+  echo "## Signaux NPM"
+  rg -n '"(postinstall|preinstall|install|prepare)"\s*:' "$TARGET" -g 'package.json' || true
+  rg -n '"bin"\s*:' "$TARGET" -g 'package.json' || true
+  rg -n 'curl|wget|powershell|Invoke-WebRequest|Invoke-Expression|child_process' "$TARGET" -g '*.js' -g '*.ts' || true
+  echo
+
+  echo "## Signaux Python"
+  rg -n 'entry_points|scripts|cmdclass|setup\(' "$TARGET" -g 'setup.py' -g 'pyproject.toml' || true
+  rg -n '\.whl$|\.so$|\.dll$|\.exe$' "$TARGET" || true
+  rg -n 'subprocess|os\.system|requests\.get|urllib\.request|curl|wget' "$TARGET" -g '*.py' || true
+  echo
+
+  echo "## Fichiers potentiellement sensibles"
+  find "$TARGET" -type f \( -name '*.sh' -o -name '*.ps1' -o -name '*.bat' -o -name '*.exe' -o -name '*.dll' \) | sort || true
+  echo
+
+  echo "## Dépendances et permissions (manuel à compléter)"
+  echo "- Dépendances détectées: compléter via lecture package.json/pyproject.toml"
+  echo "- Permissions requises: FS, réseau, process"
+  echo "- Risques: exécution post-install, téléchargement dynamique, binaire opaque"
+  echo
+
+  echo "## Verdict"
+  echo "- Statut proposé: PENDING_ADMIN_REVIEW"
+  echo "- Action: /review <package> puis /showdiff <proposal>"
+} > "$REPORT"
+
+chmod 600 "$REPORT"
+echo "OK: report=$REPORT"
+```
+
+### 5.3 Script `~/assistant/core/promote_approved.sh`
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Usage:
+#   promote_approved.sh <quarantine_dir> <proposal_id>
+
+SRC="${1:?quarantine dir required}"
+PID="${2:?proposal id required}"
+BASE="$HOME/assistant"
+APPROVED="$BASE/approved"
+AUDIT="$BASE/logs/audit.log"
+MANIFEST_DIR="$APPROVED/manifests"
+DEST="$APPROVED/$PID"
+
+[[ -d "$SRC" ]] || { echo "Missing source dir"; exit 2; }
+mkdir -p "$APPROVED" "$MANIFEST_DIR" "$BASE/logs"
+chmod 700 "$APPROVED" "$MANIFEST_DIR" "$BASE/logs"
+touch "$AUDIT"
+chmod 600 "$AUDIT"
+
+if [[ -e "$DEST" ]]; then
+  echo "Destination exists: $DEST"
+  exit 3
+fi
+
+cp -a "$SRC" "$DEST"
+chmod -R go-rwx "$DEST"
+
+MANIFEST="$MANIFEST_DIR/$PID.manifest"
+{
+  echo "proposal_id=$PID"
+  echo "promoted_at=$(date -Is)"
+  echo "source_dir=$SRC"
+  echo "approved_dir=$DEST"
+  echo "sha256_manifest_start"
+  sha256sum $(find "$DEST" -type f | sort)
+  echo "sha256_manifest_end"
+} > "$MANIFEST"
+chmod 600 "$MANIFEST"
+
+printf '%s|PROMOTE|id=%s|src=%s|dest=%s\n' "$(date -Is)" "$PID" "$SRC" "$DEST" >> "$AUDIT"
+
+echo "OK: promoted to $DEST"
+```
+
+Activation:
+
+```bash
+chmod 700 ~/assistant/core/{fetch_to_quarantine.sh,scan_quarantine.sh,promote_approved.sh}
+```
+
+---
+
+## 6) Workflow d’auto-amélioration contrôlée (PROPOSE -> DEFEND -> VALIDATE -> APPLY)
+
+1. **Detect**: l’IA détecte un nouveau skill/outillage (ex: optimisation tokens, MCP).
+2. **Fetch en quarantine**: `fetch_to_quarantine.sh`.
+3. **Scan + rapport**: `scan_quarantine.sh` + rapport lisible:
+   - résumé fonctionnel,
+   - permissions,
+   - dépendances,
+   - risques,
+   - impact tokens estimé (bench si possible),
+   - scripts/fichiers suspects,
+   - diff proposé (config/runner).
+4. **Demande admin WhatsApp**.
+5. **Admin décide**:
+   - `/approve <id>` puis `CONFIRM <id>`
+   - ou `/reject <id>`
+6. **Si approuvé**:
+   - `promote_approved.sh <dir> <id>`
+   - redémarrage runtime contrôlé.
+7. **Audit complet** dans `~/assistant/logs/audit.log`.
+
+### Commandes WhatsApp (convention opératoire)
+
+- `/review <package>` -> lance analyse staging + rapport.
+- `/showdiff <proposal>` -> montre diff de proposition.
+- `/approve <id>` puis `CONFIRM <id>` -> promotion/apply autorisés.
+- `/reject <id>` -> blocage + archivage.
+
+---
+
+## 7) Service systemd user runtime durci
+
+Créer `~/.config/systemd/user/openclaw-gateway.service`:
+
+```ini
 [Unit]
-Description=OpenClaw Gateway
+Description=OpenClaw Gateway (runtime unique verrouillé)
 After=network-online.target
 Wants=network-online.target
 
@@ -295,608 +511,273 @@ Type=simple
 ExecStart=/usr/bin/env openclaw gateway run --bind loopback --port 18789 --force
 Restart=always
 RestartSec=5
-Environment=OPENCLAW_STATE_DIR=%h/.openclaw
 Environment=HOME=%h
-WorkingDirectory=%h
+Environment=OPENCLAW_STATE_DIR=%h/.openclaw
+WorkingDirectory=%h/assistant/runtime
+
+# Logs
 StandardOutput=append:%h/assistant/logs/gateway.log
 StandardError=append:%h/assistant/logs/gateway.err.log
 
+# Hardening demandé
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=%h/assistant %h/.openclaw
+UMask=0077
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
 [Install]
 WantedBy=default.target
-EOSERVICE
 ```
 
-Activer et démarrer:
+Activation:
 
 ```bash
+mkdir -p ~/.config/systemd/user
 systemctl --user daemon-reload
 systemctl --user enable --now openclaw-gateway.service
 systemctl --user status openclaw-gateway.service --no-pager
-```
-
-Activer le user-linger facultatif mais recommandé:
-
-```bash
 sudo loginctl enable-linger "$USER"
 ```
 
-## 10. Configuration memU opérationnelle
+### Compatibilité WSL2
 
-Installer memU avant l'initialisation des répertoires:
+#### Profil minimal (si durcissement casse le runtime)
 
-```bash
-python3 -m venv ~/assistant/.venv-memu
-source ~/assistant/.venv-memu/bin/activate
-pip install --upgrade pip
-pip install git+https://github.com/NevaMind-AI/memU.git
-python -c "import memu; print('memU OK')"
-deactivate
-```
+- Garder: `NoNewPrivileges=true`, `PrivateTmp=true`, `UMask=0077`, `RestrictSUIDSGID=true`, `LockPersonality=true`.
+- Retirer temporairement: `MemoryDenyWriteExecute=true` et/ou `ProtectSystem=strict`.
 
-Alternative pour figer une version (recommandé en prod):
+#### Profil renforcé (si compatible)
+
+- Activer tout le bloc ci-dessus.
+- Valider avec:
 
 ```bash
-source ~/assistant/.venv-memu/bin/activate
-pip install git+https://github.com/NevaMind-AI/memU.git@<commit-ou-tag>
-deactivate
+systemd-analyze security --user openclaw-gateway.service || true
+systemctl --user restart openclaw-gateway.service
+systemctl --user status openclaw-gateway.service --no-pager
 ```
 
-Ensuite créer l'arborescence mémoire:
+---
+
+## 8) Runtime vs réseau/install
+
+Règles runtime (prod):
+
+- pas d’installation de paquet,
+- exécution via `run_safe.sh` seulement,
+- pas d’accès staging/quarantine depuis runtime,
+- réseau du runtime à minimiser (loopback pour gateway + flux nécessaires WhatsApp).
+
+Vérification pratique (smoke plus bas): tenter une commande d’installation via runner -> doit être refusée.
+
+---
+
+## 9) Logs, audit append-only et rotation
+
+### 9.1 Audit append-only
 
 ```bash
-mkdir -p ~/assistant/state/memu/{identity,decisions,optimizations,errors,summaries}
+touch ~/assistant/logs/audit.log
+chmod 600 ~/assistant/logs/audit.log
+if command -v chattr >/dev/null 2>&1; then
+  chattr +a ~/assistant/logs/audit.log 2>/dev/null || true
+fi
 ```
 
-Créer un bootstrap initial:
+> Sous WSL2, `chattr +a` peut être non supporté selon FS/driver. Dans ce cas, garder permissions strictes + audit via scripts only.
+
+### 9.2 Rotation hebdo + compression
+
+Créer `~/.config/logrotate/openclaw.conf`:
+
+```conf
+/home/<user>/assistant/logs/*.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0600 <user> <user>
+}
+```
+
+Test manuel:
 
 ```bash
-cat > ~/assistant/state/memu/identity/admin-principles.md <<'EOMEM'
-# Identité administrateur
-- Admin principal: +33600000001
-- Priorité absolue: demandes explicites de l admin principal
-- Aucune action externe sans validation explicite
-- Curiosité autorisée mais disciplinée
-EOMEM
+logrotate -d ~/.config/logrotate/openclaw.conf
+logrotate -f ~/.config/logrotate/openclaw.conf
 ```
 
-### Intégration OpenClaw x memU: validation pragmatique
+---
 
-Cette architecture est cohérente, mais l'intégration exacte dépend de votre version OpenClaw et du mode d'intégration memU (fichiers, wrapper local, ou plugin). Avant passage en production, valider au minimum:
+## 10) Budgets tokens (stricts)
 
-1. **Écriture réelle**: lancer une tâche, puis vérifier que `~/assistant/state/memu/*` reçoit bien des entrées.
-2. **Lecture mémoire**: soumettre une question dépendante d'un contexte passé et vérifier la restitution.
-3. **Fallback sain**: en cas d'indisponibilité memU, l'agent continue en mode dégradé sans action externe non validée.
-4. **Audit**: journaliser les appels mémoire dans `~/assistant/logs/audit.log`.
+Valeurs par défaut recommandées:
 
-## 11. Cron jobs discipline et maintenance
+- `150000` tokens / jour.
+- `30000` tokens / tâche.
+- hard stop à **80%** sans override admin.
 
-Installer crontab utilisateur:
+Mode “session analyse temporaire”:
 
-Le bloc ci-dessous contient **5 commandes shell**:
+1. Admin autorise explicitement une hausse ponctuelle.
+2. L’IA journalise l’override (raison, durée).
+3. Retour automatique au profil strict à la fin de la session.
 
-1. `crontab -l ...`
-2. `cat >> /tmp/mycron <<'EOCRON'` (commande here-doc)
-3. `crontab /tmp/mycron`
-4. `rm -f /tmp/mycron`
-5. `crontab -l`
+---
 
-Important: la commande `cat ... <<'EOCRON'` se lance en **une seule fois**. Après avoir validé cette ligne, collez le contenu cron brut, puis terminez avec `EOCRON` seul sur sa ligne. N'ajoutez pas de `\\n` littéraux.
+## 11) Daily research sans spam
 
-```bash
-crontab -l 2>/dev/null > /tmp/mycron || true
-cat >> /tmp/mycron <<'EOCRON'
-# Veille quotidienne une fois par jour
-15 8 * * * /home/<user>/assistant/core/research-daily.sh >> /home/<user>/assistant/logs/research.log 2>&1
-
-# Compression memoire quotidienne
-30 8 * * * /home/<user>/assistant/core/memory-compact.sh >> /home/<user>/assistant/logs/memory.log 2>&1
-
-# Digest hebdo dimanche
-0 9 * * 0 /home/<user>/assistant/core/weekly-digest.sh >> /home/<user>/assistant/logs/digest.log 2>&1
-
-# Rapport tokens hebdo
-30 9 * * 0 /home/<user>/assistant/core/tokens-weekly-report.sh >> /home/<user>/assistant/logs/tokens.log 2>&1
-EOCRON
-crontab /tmp/mycron
-rm -f /tmp/mycron
-crontab -l
-```
-
-## 12. Scripts minimaux core
-
-### 12.1 Veille quotidienne contrôlée
-
-`~/assistant/core/research-daily.sh`
+Script `~/assistant/core/research_daily.sh`:
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 
-LOCK=~/assistant/state/research.lock
-TODAY=$(date +%F)
-STAMP=~/assistant/state/research.last
+BASE="$HOME/assistant"
+LOCK="$BASE/staging/tmp/research.lock"
+STATE_DIR="$BASE/staging/tmp"
+OUT="$BASE/staging/reports/research-signals.txt"
+HASH_FILE="$STATE_DIR/research.last.hash"
 
-if [[ -f "$STAMP" && "$(cat "$STAMP")" == "$TODAY" ]]; then
-  exit 0
-fi
+mkdir -p "$BASE/staging/reports" "$STATE_DIR" "$BASE/logs"
 
 exec 9>"$LOCK"
 flock -n 9 || exit 0
 
-# Strategie offline first: collecter d abord les signaux locaux
-rg -n "TODO|FIXME|debt|token|latency" ~/assistant ~/workspace/openclaw > ~/assistant/feeds/local-signals.txt || true
+rg -n "TODO|FIXME|security|token|latency|cost" "$BASE/workspaces" > "$OUT" || true
+COUNT="$(wc -l < "$OUT" | tr -d ' ')"
+NEWHASH="$(sha256sum "$OUT" | awk '{print $1}')"
+OLDHASH="$(cat "$HASH_FILE" 2>/dev/null || true)"
 
-# Appel modele seulement si signaux actionnables detectes
-if [[ -s ~/assistant/feeds/local-signals.txt ]]; then
-  openclaw message send --channel whatsapp --to +33600000001 <<'EOMSG'
-Veille quotidienne: signaux actionnables detectes.
-Synthese disponible dans ~/assistant/feeds/local-signals.txt.
-Souhaitez-vous une proposition de plan en 3 actions prioritaires?
-EOMSG
+# Notifier seulement si changement + au moins 3 signaux
+if [[ "$NEWHASH" != "$OLDHASH" && "$COUNT" -ge 3 ]]; then
+  printf '%s|RESEARCH|signals=%s|hash=%s\n' "$(date -Is)" "$COUNT" "$NEWHASH" >> "$BASE/logs/audit.log"
+  # Envoi WhatsApp piloté par OpenClaw (selon votre commande/flux)
 fi
 
-echo "$TODAY" > "$STAMP"
+echo "$NEWHASH" > "$HASH_FILE"
 ```
 
-### 12.2 Compaction mémoire intelligente
-
-`~/assistant/core/memory-compact.sh`
+Activer:
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-MEMROOT=~/assistant/state/memu
-OUT="$MEMROOT/summaries/summary-$(date +%F).md"
-
-{
-  echo "# Resume memoire $(date +%F)"
-  echo
-  echo "## Decisions"
-  tail -n 200 "$MEMROOT/decisions"/*.md 2>/dev/null || true
-  echo
-  echo "## Optimisations"
-  tail -n 200 "$MEMROOT/optimizations"/*.md 2>/dev/null || true
-  echo
-  echo "## Erreurs"
-  tail -n 200 "$MEMROOT/errors"/*.md 2>/dev/null || true
-} > "$OUT"
+chmod 700 ~/assistant/core/research_daily.sh
+(crontab -l 2>/dev/null; echo "15 8 * * * $HOME/assistant/core/research_daily.sh >> $HOME/assistant/logs/research.log 2>&1") | crontab -
 ```
 
-### 12.3 Rapport tokens hebdomadaire
+---
 
-`~/assistant/core/tokens-weekly-report.sh`
+## 12) memU : persistance + mode dégradé
+
+### 12.1 Checklist preuve de persistance
+
+1. Écrire une règle (ex: identité admin) dans memU.
+2. Redémarrer runtime:
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-LOG=~/assistant/logs/audit.log
-OUT=~/assistant/logs/tokens-weekly-$(date +%F).md
-
-{
-  echo "# Rapport tokens hebdomadaire"
-  echo
-  echo "## Budget"
-  echo "- Journalier: 1 200 000"
-  echo "- Par tache: 120 000"
-  echo
-  echo "## Heuristique ROI"
-  echo "- N appeler le modele que si gain attendu > cout"
-  echo "- Priorite aux operations offline: rg, diff, logs"
-  echo
-  echo "## Top appels"
-  rg -n "MODEL_CALL|TOKENS" "$LOG" | tail -n 200 || true
-} > "$OUT"
-```
-
-Rendre exécutables:
-
-```bash
-chmod +x ~/assistant/core/*.sh
-```
-
-## 13. Budget tokens et discipline opérationnelle
-
-Politique recommandée:
-
-- Budget journalier global: 1.2M tokens.
-- Budget par tâche: 120k tokens.
-- Hard stop à 85 pourcent du budget journalier sauf override admin.
-- Offline-first systématique:
-  1. `rg` local.
-  2. lecture logs.
-  3. `git diff`.
-  4. shortlist des hypothèses.
-  5. appel LLM en dernier.
-- Cache agressif des résultats stables.
-
-## 14. Workflow auto-amélioration sécurisé
-
-### Pipeline obligatoire
-
-1. Idée d'amélioration capturée dans `~/assistant/skills/staging`.
-2. Génération du skill local uniquement sans marketplace.
-3. Tests unitaires et tests sandbox.
-4. Rapport de risque et rollback plan.
-5. Validation explicite admin principal.
-6. Activation vers `~/assistant/skills/enabled`.
-7. Monitoring 24 heures.
-8. Rollback automatique si échec.
-
-### Script promotion contrôlée
-
-`~/assistant/core/promote-skill.sh`
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-SKILL_NAME="${1:?usage: promote-skill.sh <skill-name>}"
-ADMIN_APPROVED_FILE=~/assistant/state/admin-approvals/${SKILL_NAME}.ok
-STAGING=~/assistant/skills/staging/${SKILL_NAME}
-ENABLED=~/assistant/skills/enabled/${SKILL_NAME}
-
-[[ -d "$STAGING" ]] || { echo "Skill staging introuvable"; exit 1; }
-[[ -f "$ADMIN_APPROVED_FILE" ]] || { echo "Validation admin manquante"; exit 2; }
-
-if [[ -x "$STAGING/test.sh" ]]; then
-  "$STAGING/test.sh"
-fi
-
-rm -rf "$ENABLED.bak" || true
-if [[ -d "$ENABLED" ]]; then
-  mv "$ENABLED" "$ENABLED.bak"
-fi
-cp -a "$STAGING" "$ENABLED"
-
-echo "Promotion OK: $SKILL_NAME"
-```
-
-Rollback:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-SKILL_NAME="${1:?usage: rollback-skill.sh <skill-name>}"
-ENABLED=~/assistant/skills/enabled/${SKILL_NAME}
-BACKUP=~/assistant/skills/enabled/${SKILL_NAME}.bak
-[[ -d "$BACKUP" ]] || { echo "Backup absent"; exit 1; }
-rm -rf "$ENABLED"
-mv "$BACKUP" "$ENABLED"
-```
-
-## 15. Politique interne agent constitution
-
-Créer `~/assistant/state/constitution.md`:
-
-```markdown
-# Constitution agent autonome
-
-## Mission
-
-Servir l administrateur principal avec discipline, securite et efficacite.
-
-## Regles absolues
-
-1. Lecture locale et distante autorisee.
-2. Ecriture autorisee uniquement dans espaces controles.
-3. Actions externes interdites sans validation explicite admin.
-4. Priorite absolue aux demandes admin principal.
-5. Maximum une session de veille par jour, maximum une notification veille par jour.
-6. Jamais de marketplace skills.
-7. Toujours proposer un plan de rollback avant activation d une amelioration.
-
-## Gouvernance
-
-- Admin principal: +33600000001
-- Interlocuteurs secondaires: lecture et consultation uniquement.
-
-## Discipline tokens
-
-- Offline-first obligatoire.
-- Budget journalier et budget par tache non depassables sans validation admin.
-```
-
-## 16. Mise à jour contrôlée OpenClaw
-
-Workflow recommandé:
-
-1. Snapshot config et état.
-2. Mise à jour en staging.
-3. Tests de non-régression.
-4. Validation admin.
-5. Bascule production.
-6. Rollback si incident.
-
-Exemple:
-
-```bash
-mkdir -p ~/assistant/state/backups
-cp ~/.openclaw/openclaw.json ~/assistant/state/backups/openclaw.json.$(date +%F-%H%M%S)
-
-openclaw --version
-sudo npm i -g openclaw@latest
-openclaw --version
-
-openclaw channels status --probe
-systemctl --user restart openclaw-gateway.service
-systemctl --user status openclaw-gateway.service --no-pager
-```
-
-## 17. Vérifications finales production
-
-```bash
-systemctl --user is-active openclaw-gateway.service
-openclaw channels status --probe
-ss -ltnp | rg 18789
-tail -n 120 ~/assistant/logs/gateway.log
-crontab -l
-```
-
-Checklist:
-
-- Service stable après redémarrage WSL2.
-- WhatsApp limité à la allowlist.
-- Admin principal reconnu.
-- memU enregistre identité, décisions, erreurs, optimisations.
-- Veille limitée à une notification par jour.
-- Skills externes bloqués, marketplace désactivé.
-- Workflow staging test validation activation rollback opérationnel.
-
-## 18. Notes exploitation WSL2
-
-- Stocker tous les états dans le système de fichiers Linux `/home/...` plutôt que dans `/mnt/c/...`.
-- Synchroniser l'horloge hôte et vérifier timezone Ubuntu.
-- Sauvegarder `~/assistant/state` et `~/.openclaw` quotidiennement.
-
-Ce setup donne un agent autonome avancé, discipliné et contrôlable, sans Docker, adapté à WSL2.
-
-## 19. Procédure opératoire complète sans étape implicite
-
-Cette section reformule la procédure en mode check-list débutant. Exécuter les blocs dans l'ordre exact.
-
-### 1) Objectif exact
-
-Obtenir un environnement Windows 11 Pro + Ubuntu WSL2 où:
-
-- `systemd` est actif dans WSL2 (PID 1).
-- OpenClaw tourne en service utilisateur persistant.
-- WhatsApp est relié et contrôlé par allowlist/pairing.
-- memU est installé et exploitable.
-- Les logs, scripts de maintenance et contrôles de santé sont en place.
-
-### 2) Ce qui doit déjà exister
-
-Avant de commencer, vérifier ces préconditions:
-
-1. Vous avez un compte Windows avec droits administrateur.
-2. Vous avez une connexion Internet stable.
-3. Vous avez un compte OpenAI + un compte Gemini (si vous gardez ces providers).
-4. Vous avez un numéro WhatsApp admin et, idéalement, un numéro dédié agent.
-5. Vous connaissez votre utilisateur Linux WSL (exemple: `alex`) pour remplacer `<user>` dans les chemins.
-
-### 3) Ce que vous devez modifier (fichiers précis)
-
-1. `/etc/wsl.conf` (dans Ubuntu WSL) pour activer systemd.
-2. `~/.openclaw/openclaw.json` (config OpenClaw complète, remplacer `<user>` et numéros fictifs).
-3. `~/.config/systemd/user/openclaw-gateway.service` (service systemd user).
-4. `~/assistant/state/memu/identity/admin-principles.md` (bootstrap mémoire).
-5. `~/assistant/core/*.sh` (scripts de maintenance: veille, compaction, rapport tokens).
-6. Crontab utilisateur (via `crontab -l` / `crontab /tmp/mycron`).
-
-### 4) Commandes exactes à exécuter
-
-#### 4.1 Windows PowerShell (Administrateur)
-
-```powershell
-wsl --install -d Ubuntu
-wsl --set-default-version 2
-wsl --update
-```
-
-Redémarrage obligatoire: redémarrer Windows pour terminer l'activation WSL.
-
-#### 4.2 Ubuntu WSL (premier démarrage)
-
-```bash
-uname -a
-wsl.exe --status
-```
-
-#### 4.3 Activer systemd
-
-Dans Ubuntu:
-
-```bash
-sudo tee /etc/wsl.conf >/dev/null <<'EOWSLCONF'
-[boot]
-systemd=true
-EOWSLCONF
-```
-
-Dans PowerShell:
-
-```powershell
-wsl --shutdown
-```
-
-Redémarrage obligatoire: relancer Ubuntu pour rebooter l'instance WSL avec `systemd=true`.
-
-Vérification immédiate:
-
-```bash
-systemctl is-system-running
-ps -p 1 -o comm=
-```
-
-#### 4.4 Installer base système + runtimes
-
-```bash
-sudo apt update
-sudo apt upgrade -y
-sudo apt install -y curl git jq ca-certificates build-essential python3 python3-venv python3-pip cron ripgrep
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-sudo apt install -y nodejs
-node -v
-npm -v
-sudo npm install -g pnpm
-pnpm -v
-```
-
-#### 4.5 Installer OpenClaw + arborescence contrôlée
-
-```bash
-sudo npm install -g openclaw@latest
-openclaw --version
-mkdir -p ~/assistant/{core,skills/staging,skills/enabled,sandbox,logs,state,feeds}
-chmod 700 ~/assistant ~/assistant/state ~/assistant/logs ~/assistant/sandbox
-chmod 750 ~/assistant/skills ~/assistant/skills/enabled ~/assistant/skills/staging
-```
-
-#### 4.6 Authentifier providers + config modèles
-
-```bash
-openclaw login
-openclaw config set model.provider openai
-openclaw config set model.name codex-5.3
-openclaw config set model.fallbackProvider gemini
-openclaw config set model.fallbackName gemini-3.1-pro
-openclaw models list
-openclaw config get model.provider
-openclaw config get model.name
-openclaw config get model.fallbackProvider
-openclaw config get model.fallbackName
-```
-
-#### 4.7 Installer et valider memU
-
-```bash
-python3 -m venv ~/assistant/.venv-memu
-source ~/assistant/.venv-memu/bin/activate
-pip install --upgrade pip
-pip install git+https://github.com/NevaMind-AI/memU.git
-python -c "import memu; print('memU OK')"
-deactivate
-mkdir -p ~/assistant/state/memu/{identity,decisions,optimizations,errors,summaries}
-```
-
-#### 4.8 Activer le service OpenClaw via systemd
-
-Créer le fichier `~/.config/systemd/user/openclaw-gateway.service` avec le contenu de la section 9, puis:
-
-```bash
-systemctl --user daemon-reload
-systemctl --user enable --now openclaw-gateway.service
-systemctl --user status openclaw-gateway.service --no-pager
-sudo loginctl enable-linger "$USER"
-```
-
-Redémarrage recommandé: fermer/réouvrir session WSL puis revérifier `systemctl --user status ...`.
-
-#### 4.9 Connecter WhatsApp et tester de bout en bout
-
-```bash
-openclaw channels login --channel whatsapp
-openclaw channels status --probe
-openclaw pairing list whatsapp
-openclaw pairing approve whatsapp <CODE>
-openclaw message send --channel whatsapp --target +33600000001 --message "Test WSL2 OK"
-```
-
-#### 4.10 Installer les cron jobs de maintenance
-
-Même principe ici: exécuter le bloc tel quel, et traiter `cat >> /tmp/mycron <<'EOCRON'` comme une commande multi-ligne unique terminée par `EOCRON`.
-
-```bash
-crontab -l 2>/dev/null > /tmp/mycron || true
-cat >> /tmp/mycron <<'EOCRON'
-# Veille quotidienne une fois par jour
-15 8 * * * /home/<user>/assistant/core/research-daily.sh >> /home/<user>/assistant/logs/research.log 2>&1
-
-# Compression memoire quotidienne
-30 8 * * * /home/<user>/assistant/core/memory-compact.sh >> /home/<user>/assistant/logs/memory.log 2>&1
-
-# Digest hebdo dimanche
-0 9 * * 0 /home/<user>/assistant/core/weekly-digest.sh >> /home/<user>/assistant/logs/digest.log 2>&1
-
-# Rapport tokens hebdo
-30 9 * * 0 /home/<user>/assistant/core/tokens-weekly-report.sh >> /home/<user>/assistant/logs/tokens.log 2>&1
-EOCRON
-crontab /tmp/mycron
-rm -f /tmp/mycron
-crontab -l
-```
-
-### 5) Ce que vous devez voir si tout va bien
-
-- `ps -p 1 -o comm=` affiche `systemd`.
-- `systemctl --user status openclaw-gateway.service` affiche `active (running)`.
-- `openclaw channels status --probe` retourne un état sain pour WhatsApp.
-- `ss -ltnp | rg 18789` montre une écoute locale sur `127.0.0.1:18789`.
-- `python -c "import memu; ..."` affiche `memU OK`.
-- `crontab -l` contient bien les tâches planifiées.
-
-### 6) Erreurs possibles et diagnostic
-
-1. `systemctl` échoue dans WSL:
-   - Vérifier `/etc/wsl.conf`.
-   - Exécuter `wsl --shutdown`, relancer Ubuntu, revérifier PID 1.
-
-2. Service OpenClaw en `failed`:
-   - `systemctl --user status openclaw-gateway.service --no-pager`
-   - `tail -n 120 ~/assistant/logs/gateway.err.log`
-   - vérifier `openclaw --version` et PATH.
-
-3. WhatsApp non authentifié:
-   - relancer `openclaw channels login --channel whatsapp`.
-   - rescanner le QR, puis `openclaw channels status --probe`.
-
-4. memU import impossible:
-   - réactiver le venv, réinstaller memU, retester import.
-
-5. Cron n'exécute rien:
-   - vérifier `crontab -l`, permissions `chmod +x ~/assistant/core/*.sh`, chemins `/home/<user>/...`.
-
-### 7) Revenir en arrière si ça casse
-
-Rollback minimal recommandé:
-
-1. Sauvegarder avant modification:
-
-```bash
-mkdir -p ~/assistant/state/backups
-cp ~/.openclaw/openclaw.json ~/assistant/state/backups/openclaw.json.$(date +%F-%H%M%S)
-```
-
-2. Restaurer une config antérieure si incident:
-
-```bash
-cp ~/assistant/state/backups/openclaw.json.<horodatage> ~/.openclaw/openclaw.json
 systemctl --user restart openclaw-gateway.service
 ```
 
-3. En cas d'échec d'un skill promu, restaurer le backup via le script de rollback de la section 14.
+3. Vérifier que la règle est relue après restart (question de contrôle via WhatsApp + vérification des fichiers memU).
 
-4. En cas de panne memU, revenir temporairement en mode dégradé (sans action externe non validée) jusqu'à correction.
+### 12.2 Si memU indisponible
 
-### 8) Vérifier que c'est réellement fonctionnel
+Basculer automatiquement en mode dégradé:
 
-Effectuer un test de persistance réel:
+- read-only,
+- aucune action externe,
+- aucune suggestion intrusive d’exécution,
+- notifier admin que memU est indisponible.
 
-1. Redémarrer Windows.
-2. Ouvrir Ubuntu WSL.
-3. Exécuter:
+---
+
+## 13) Permissions et isolation dossiers
+
+Appliquer:
 
 ```bash
-systemctl --user is-active openclaw-gateway.service
-openclaw channels status --probe
-ss -ltnp | rg 18789
-tail -n 120 ~/assistant/logs/gateway.log
-crontab -l
+chmod 700 ~/assistant ~/.openclaw ~/assistant/quarantine ~/assistant/approved ~/assistant/logs
 ```
 
-4. Envoyer un message WhatsApp depuis un numéro autorisé.
-5. Vérifier la réponse agent + la présence de traces dans logs/audit + mises à jour dans `~/assistant/state/memu/*`.
+Option `noexec`:
 
-Validation finale: si ces 5 points sont bons après redémarrage complet, l'installation est opérationnelle.
+- Possible sur certains montages Linux dédiés.
+- Sous WSL2 standard, c’est souvent limité/non pertinent sur `/home`.
+- Si indisponible: compenser avec `run_safe.sh`, chemins stricts, et séparation runtime/staging.
+
+---
+
+## 14) Tests de validation / smoke tests
+
+### 14.1 `run_safe` accepte `git status`
+
+```bash
+mkdir -p ~/assistant/workspaces/demo && cd ~/assistant/workspaces/demo
+git init -q
+~/assistant/core/run_safe.sh git status
+```
+
+### 14.2 `run_safe` refuse injection `; rm -rf`
+
+```bash
+~/assistant/core/run_safe.sh git status ';' rm -rf /
+# attendu: DENY
+```
+
+### 14.3 staging `fetch -> scan -> promote`
+
+```bash
+QDIR=$(~/assistant/core/fetch_to_quarantine.sh https://example.com testpkg | awk '{print $2}')
+# si URL exemple inutilisable, remplacer par source réelle interne validée
+~/assistant/core/scan_quarantine.sh "${QDIR#OK: }"
+~/assistant/core/promote_approved.sh "${QDIR#OK: }" proposal-001
+```
+
+### 14.4 runtime ne peut pas installer
+
+```bash
+~/assistant/core/run_safe.sh npm install left-pad
+# attendu: DENY
+```
+
+### 14.5 memU persiste après restart
+
+```bash
+systemctl --user restart openclaw-gateway.service
+systemctl --user status openclaw-gateway.service --no-pager
+# puis vérifier une donnée memU écrite avant restart
+```
+
+---
+
+## 15) Mise en production (checklist finale, 10 points max)
+
+1. systemd actif dans WSL2 (PID1 = systemd).
+2. Une seule instance OpenClaw active (`openclaw-gateway.service`).
+3. Dossiers `~/assistant/*` créés et permissions `700` appliquées.
+4. Runner unique `~/assistant/core/run_safe.sh` actif.
+5. Pipeline quarantine -> scan -> promote opérationnel.
+6. WhatsApp canal unique + allowlist admin stricte.
+7. Double confirmation active: `/approve <id>` puis `CONFIRM <id>`.
+8. Audit log actif + rotation hebdo configurée.
+9. Budgets tokens stricts (150k/j, 30k/tâche, stop à 80%).
+10. memU validé (persistance OK) ou mode dégradé activé.
+
+---
+
+## 16) Exploitation quotidienne (WhatsApp-first, zéro shell au quotidien)
+
+Une fois installé:
+
+- Vous pilotez via WhatsApp.
+- L’IA peut lire/analyser/préparer en staging.
+- L’IA ne promeut ni n’applique en runtime sans votre approbation explicite.
+- Le shell sert uniquement à l’installation initiale, maintenance planifiée et audit.
