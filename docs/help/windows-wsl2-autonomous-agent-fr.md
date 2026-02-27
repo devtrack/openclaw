@@ -448,7 +448,7 @@ MANIFEST="$MANIFEST_DIR/$PID.manifest"
   echo "source_dir=$SRC"
   echo "approved_dir=$DEST"
   echo "sha256_manifest_start"
-  sha256sum $(find "$DEST" -type f | sort)
+  find "$DEST" -type f -print0 | sort -z | xargs -0 sha256sum
   echo "sha256_manifest_end"
 } > "$MANIFEST"
 chmod 600 "$MANIFEST"
