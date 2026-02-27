@@ -3,29 +3,34 @@ summary: "Guide V2 sécurisé pour déployer OpenClaw sur Windows 11 + WSL2 en m
 read_when:
   - Vous voulez piloter OpenClaw uniquement via WhatsApp
   - Vous voulez une architecture autonome mais sous contrôle admin strict
+  - Vous voulez une politique READ libre / WRITE-ACTION contrôlée
   - Vous voulez durcir runtime, staging et audit sur une home box
 title: "OpenClaw V2 sécurisé sur Windows + WSL2 (WhatsApp-first)"
 ---
 
 # OpenClaw V2 sécurisé sur Windows 11 + WSL2 (WhatsApp-first)
 
-Ce guide installe **une seule instance OpenClaw** (service `systemd --user`) sur WSL2.
+Ce guide installe **une seule instance OpenClaw** (service `systemd --user`) sur WSL2, avec une politique simple:
+
+- **READ = libre**: l’IA peut observer, lire, scanner, interroger et télécharger pour analyse.
+- **WRITE/ACTION = gouverné**: toute action qui modifie l’état du système, déclenche une action externe, ou exfiltre des données hors périmètre autorisé doit obtenir une approbation admin WhatsApp.
+
+Rôles:
 
 - **Admin (vous)** = décideur final.
-- **IA** = opérateur en staging + exécution runtime **uniquement après approbation explicite WhatsApp**.
-- **Aucune action externe sensible** (mail, paiement, appel API critique, commandes de production) sans validation admin.
+- **IA** = opérateur de lecture/analyse autonome + exécution d’actions uniquement après approbation explicite.
 
 ---
 
-## 1) Principe central : un seul OpenClaw (runtime verrouillé) + staging opéré par l’IA
+## 1) Principe central : un seul OpenClaw runtime + staging opéré par l’IA
 
 ```text
                         WhatsApp (canal unique)
                                  |
                +-----------------+-----------------+
                |                                   |
-       user commands                       admin commands
-   (lecture / questions)           (/approve, /reject, CONFIRM)
+       messages utilisateur                  messages admin
+   (lecture / questions)         (autoriser ou refuser l'action)
                |                                   |
                +-----------------+-----------------+
                                  |
@@ -34,12 +39,13 @@ Ce guide installe **une seule instance OpenClaw** (service `systemd --user`) sur
                                  |
                  +---------------+----------------+
                  |                                |
-         lecture contrôlée                  exécution contrôlée
-   (runtime/workspaces/logs/approved)   (UNIQUE runner: run_safe.sh)
+     READ autorisé sans friction         WRITE/ACTION sous approbation
+   (lecture locale, scan LAN, HTTPS,     (modifs système, exposition,
+    RTSP, APIs lecture, download analyse)  actions mutantes/exfiltration)
                  |
       +----------+----------------------------------------------+
       |                                                         |
- staging (scripts + dossiers, pas un service OpenClaw)   quarantine/approved
+ staging (dossiers/scripts, pas un service OpenClaw)     quarantine/approved
       |                                                         |
  fetch -> scan -> rapport -> demande approbation -> promote ----+
                      (admin WhatsApp décide)
@@ -56,7 +62,7 @@ chmod 700 ~/assistant/{runtime,staging,quarantine,approved,logs,workspaces,core}
 chmod 700 ~/assistant/staging/{reports,proposals,tmp}
 ```
 
-> **Important**: `staging` est un espace de travail (fichiers/scripts), **pas un second OpenClaw**.
+> **Important**: `staging` est un espace opéré par l’IA (scripts, analyses, benchmarks), **pas un second OpenClaw**. Un seul service runtime tourne.
 
 ---
 
@@ -99,8 +105,10 @@ systemctl is-system-running || true
 ```bash
 sudo apt update
 sudo apt upgrade -y
-sudo apt install -y curl wget ca-certificates jq ripgrep git logrotate coreutils findutils cron util-linux
+sudo apt install -y curl wget ca-certificates jq ripgrep git logrotate coreutils findutils cron util-linux iputils-ping net-tools lsof
 ```
+
+> `nmap` n’est pas obligatoire. Si vous l’avez déjà, utilisez-le. Sinon, utilisez `ping`, `arp -an`, `/proc/net/arp`, ou `ip neigh`.
 
 ### 2.4 Node 22 + OpenClaw
 
@@ -114,7 +122,7 @@ openclaw --version
 
 ---
 
-## 3) Configuration OpenClaw (WhatsApp-only, séparation logique user/admin)
+## 3) Configuration OpenClaw (WhatsApp-only)
 
 1. Login:
 
@@ -131,16 +139,14 @@ openclaw config set gateway.port 18789
 openclaw config set routing.defaultChannel whatsapp
 ```
 
-3. Principes de sécurité à appliquer dans votre config OpenClaw:
+3. Principes sécurité:
 
 - Canal unique: `whatsapp`.
-- Allowlist stricte des numéros admin (ex: `+33...`).
-- Séparation logique:
-  - **user commands**: lecture, questions, synthèse.
-  - **admin commands**: approbation/rejet/changements runtime.
+- Allowlist stricte des numéros autorisés (admin + numéro opérateur si distinct).
 - Double confirmation pour actions sensibles:
   - `/approve <id>`
   - `CONFIRM <id>`
+- **Raccourci explicite accepté**: si l’admin répond clairement `ok` à une question explicite (ex: “est-ce que je peux installer X ?”), cela vaut approbation pour cette action précise.
 - Journaliser toute validation/rejet dans `~/assistant/logs/audit.log`.
 
 4. Pairing + statut WhatsApp:
@@ -152,11 +158,76 @@ openclaw channels status --probe
 
 ---
 
-## 4) Safe Runner / Command Executor (allowlist = 1 exécutable)
+## 4) Politique Read vs Write (section centrale)
 
-Le runtime ne doit exécuter **qu’un seul binaire/script**: `~/assistant/core/run_safe.sh`.
+Le runtime OpenClaw a le droit d’accéder au réseau (LAN + Internet) pour la **lecture/analyse**. Le contrôle se fait sur la nature de l’action (READ vs WRITE/ACTION), pas sur “couper le réseau”.
 
-### 4.1 Script complet `~/assistant/core/run_safe.sh`
+### 4.1 READ (autorisé sans validation)
+
+- Lecture de fichiers locaux autorisés.
+- Scan réseau local (ARP, ping sweep, `nmap` si déjà présent).
+- Accès RTSP local en lecture (caméras).
+- Requêtes sortantes HTTP(S) pour lecture (docs, APIs read-only, veille).
+- Interrogation Alexa/APIs cloud en mode lecture.
+- Téléchargement de code en quarantaine pour analyse.
+- Stockage local de secrets/tokens dans un répertoire protégé (permissions strictes).
+
+### 4.2 WRITE/ACTION (validation admin obligatoire)
+
+- Ouvrir un port entrant / exposer un service.
+- Modifier configuration système, systemd, firewall, DNS.
+- Installer/désinstaller des logiciels Windows ou WSL.
+- Modifier `run_safe.sh`, policy, allowlists, scripts critiques.
+- Appels API mutantes (create/update/delete, déclencheurs externes).
+- Déclencher une action physique (domotique, commande vocale, routine).
+- Exfiltrer des données (images/vidéo/logs) vers une destination non approuvée.
+- Envoyer fichiers/contenus hors des deux numéros WhatsApp autorisés.
+
+### 4.3 Mécanisme d’approbation WhatsApp
+
+- L’IA doit formuler une demande claire: action, impact, périmètre, rollback.
+- L’admin répond via WhatsApp:
+  - `/approve <id>` puis `CONFIRM <id>`, ou
+  - réponse explicite `ok` à la question d’autorisation ciblée.
+- Sans approbation explicite, l’action est refusée.
+- Chaque demande, approbation, rejet et exécution est inscrite dans `~/assistant/logs/audit.log`.
+
+---
+
+## 5) Contrôle d’exfiltration (données sortantes)
+
+Le runtime peut lire Internet/LAN, mais l’envoi de données sortantes est gouverné.
+
+### 5.1 Niveau 1 (recommandé, logique/applicatif)
+
+Gérer une allowlist de destinations sortantes via configuration/policy (`~/assistant/runtime/egress_allowlist.txt` par exemple):
+
+- Endpoints nécessaires au bridge WhatsApp.
+- `api.amazon.com` + endpoints Alexa nécessaires (si intégration).
+- Domaines de lecture courants: GitHub, Google, OpenAI, ChatGPT, Gmail, etc. (adapter à vos besoins réels).
+- LAN privé (`192.168.0.0/16`, `10.0.0.0/8`, `172.16.0.0/12`) pour RTSP/IoT.
+
+Règles:
+
+- Toute destination non listée déclenche une demande d’approbation admin avant ajout.
+- L’IA peut proposer/modifier cette allowlist **avec accord admin**.
+- Toute tentative vers destination non autorisée est bloquée + journalisée (audit).
+
+### 5.2 Niveau 2 (optionnel, OS/firewall)
+
+Option de durcissement via iptables/nftables (ou équivalent) pour forcer l’egress allowlist au niveau OS.
+
+- **Optionnel** (pas obligatoire).
+- Sous WSL2, comportement réseau/firewall parfois non trivial selon version/hôte Windows.
+- À activer uniquement si vous maîtrisez bien le plan de rollback.
+
+---
+
+## 6) Safe Runner / Command Executor (allowlist = 1 exécutable)
+
+Le runtime ne doit exécuter **qu’un seul script**: `~/assistant/core/run_safe.sh`.
+
+### 6.1 Script complet `~/assistant/core/run_safe.sh`
 
 ```bash
 #!/usr/bin/env bash
@@ -197,7 +268,7 @@ is_allowed_path() {
   local p
   p="$(realpath -m "$1")"
   case "$p" in
-    "$BASE/runtime"/*|"$BASE/workspaces"/*|"$BASE/logs"/*|"$BASE/approved"/*)
+    "$BASE/runtime"/*|"$BASE/workspaces"/*|"$BASE/logs"/*|"$BASE/approved"/*|"$BASE/quarantine"/*)
       return 0
       ;;
     *)
@@ -242,14 +313,48 @@ case "$cmd" in
     case "$sub" in
       status|diff)
         ;;
+      clone)
+        # Exige --depth 1 (shallow clone); destination validée par is_allowed_path (quarantine)
+        depth_ok=0
+        prev_a=""
+        for flag in "$@"; do
+          [[ "$flag" == "--depth=1" ]] && depth_ok=1
+          [[ "$prev_a" == "--depth" && "$flag" == "1" ]] && depth_ok=1
+          prev_a="$flag"
+        done
+        unset prev_a flag
+        if [[ $depth_ok -eq 0 ]]; then
+          log_event "DENY" "git clone requires --depth 1"
+          echo "DENY: git clone requires --depth 1"
+          exit 126
+        fi
+        # Bloquer les flags pouvant déclencher une exécution arbitraire (formes --flag et --flag=val)
+        for flag in "$@"; do
+          case "$flag" in
+            --upload-pack*|--exec*|--recurse-submodules*|--jobs*|-j)
+              log_event "DENY" "git clone flag forbidden: $flag"
+              echo "DENY: git clone flag not allowed: $flag"
+              exit 126
+              ;;
+          esac
+        done
+        unset flag
+        TIMEOUT_SEC="120s"
+        ;;
       *)
         log_event "DENY" "git subcommand forbidden: ${sub:-<none>}"
-        echo "DENY: only git status|diff"
+        echo "DENY: only git status|diff|clone --depth 1"
         exit 126
         ;;
     esac
     ;;
-  rg|jq|cat|head|tail|sed|awk|ls|pwd)
+  # Fetch READ-only vers quarantine.
+  # Les chemins de sortie (-o/-O/-P) sont validés par la boucle is_allowed_path ci-dessous,
+  # avant tout exec; redirections shell bloquées par contains_forbidden_tokens.
+  curl|wget)
+    TIMEOUT_SEC="60s"
+    ;;
+  rg|jq|cat|head|tail|sed|awk|ls|pwd|ping|ip|arp)
     ;;
   # Tests autorisés uniquement dans ~/assistant/workspaces/
   pytest|ctest|dotnet)
@@ -299,7 +404,7 @@ Activation:
 chmod 700 ~/assistant/core/run_safe.sh
 ```
 
-### 4.2 Règle OpenClaw
+### 6.2 Règle OpenClaw
 
 Le composant d’exécution doit pointer **uniquement** vers:
 
@@ -311,9 +416,15 @@ Aucune autre commande directe autorisée.
 
 ---
 
-## 5) Code externe : quarantine -> scan -> promote (sans service parallèle)
+## 7) Quarantine -> Scan -> Promote (sans service parallèle)
 
-### 5.1 Script `~/assistant/core/fetch_to_quarantine.sh`
+### 7.1 Règle de politique
+
+- **Autorisé sans validation**: téléchargement en quarantaine si usage strictement lecture/analyse.
+- **Validation admin obligatoire**: promotion vers `approved` (activation runtime).
+- Si l’intégration nécessite ouverture de port, modification runner/policy, ou installation Windows/WSL: classer en WRITE/ACTION (approbation + intervention admin possible clavier/souris).
+
+### 7.2 Script `~/assistant/core/fetch_to_quarantine.sh`
 
 ```bash
 #!/usr/bin/env bash
@@ -352,7 +463,7 @@ echo "dest=$DEST" >> "$DEST/FETCH.meta"
 echo "OK: $DEST"
 ```
 
-### 5.2 Script `~/assistant/core/scan_quarantine.sh`
+### 7.3 Script `~/assistant/core/scan_quarantine.sh`
 
 ```bash
 #!/usr/bin/env bash
@@ -410,7 +521,7 @@ chmod 600 "$REPORT"
 echo "OK: report=$REPORT"
 ```
 
-### 5.3 Script `~/assistant/core/promote_approved.sh`
+### 7.4 Script `~/assistant/core/promote_approved.sh`
 
 ```bash
 #!/usr/bin/env bash
@@ -466,25 +577,16 @@ chmod 700 ~/assistant/core/{fetch_to_quarantine.sh,scan_quarantine.sh,promote_ap
 
 ---
 
-## 6) Workflow d’auto-amélioration contrôlée (PROPOSE -> DEFEND -> VALIDATE -> APPLY)
+## 8) Workflow d’auto-amélioration contrôlée
 
-1. **Detect**: l’IA détecte un nouveau skill/outillage (ex: optimisation tokens, MCP).
-2. **Fetch en quarantine**: `fetch_to_quarantine.sh`.
-3. **Scan + rapport**: `scan_quarantine.sh` + rapport lisible:
-   - résumé fonctionnel,
-   - permissions,
-   - dépendances,
-   - risques,
-   - impact tokens estimé (bench si possible),
-   - scripts/fichiers suspects,
-   - diff proposé (config/runner).
-4. **Demande admin WhatsApp**.
+1. **Detect**: l’IA identifie un outillage utile.
+2. **Fetch en quarantine (READ)**: autorisé sans validation.
+3. **Scan + rapport (READ)**: résumé, dépendances, risques, impacts, diff proposé.
+4. **Demande admin WhatsApp** pour toute promotion/modification runtime.
 5. **Admin décide**:
-   - `/approve <id>` puis `CONFIRM <id>`
-   - ou `/reject <id>`
-6. **Si approuvé**:
-   - `promote_approved.sh <dir> <id>`
-   - redémarrage runtime contrôlé.
+   - `/approve <id>` puis `CONFIRM <id>`, ou réponse explicite `ok` si question ciblée,
+   - ou `/reject <id>`.
+6. **Si approuvé**: `promote_approved.sh <dir> <id>` puis application contrôlée.
 7. **Audit complet** dans `~/assistant/logs/audit.log`.
 
 ### Commandes WhatsApp (convention opératoire)
@@ -496,7 +598,7 @@ chmod 700 ~/assistant/core/{fetch_to_quarantine.sh,scan_quarantine.sh,promote_ap
 
 ---
 
-## 7) Service systemd user runtime durci
+## 9) Service systemd user runtime durci
 
 Créer `~/.config/systemd/user/openclaw-gateway.service`:
 
@@ -564,22 +666,9 @@ systemctl --user status openclaw-gateway.service --no-pager
 
 ---
 
-## 8) Runtime vs réseau/install
+## 10) Logs, audit append-only et rotation
 
-Règles runtime (prod):
-
-- pas d’installation de paquet,
-- exécution via `run_safe.sh` seulement,
-- pas d’accès staging/quarantine depuis runtime,
-- réseau du runtime à minimiser (loopback pour gateway + flux nécessaires WhatsApp).
-
-Vérification pratique (smoke plus bas): tenter une commande d’installation via runner -> doit être refusée.
-
----
-
-## 9) Logs, audit append-only et rotation
-
-### 9.1 Audit append-only
+### 10.1 Audit append-only
 
 ```bash
 touch ~/assistant/logs/audit.log
@@ -591,7 +680,7 @@ fi
 
 > Sous WSL2, `chattr +a` peut être non supporté selon FS/driver. Dans ce cas, garder permissions strictes + audit via scripts only.
 
-### 9.2 Rotation hebdo + compression
+### 10.2 Rotation hebdo + compression
 
 Créer `~/.config/logrotate/openclaw.conf`:
 
@@ -617,7 +706,7 @@ logrotate -f ~/.config/logrotate/openclaw.conf
 
 ---
 
-## 10) Budgets tokens (stricts)
+## 11) Budgets tokens (stricts)
 
 Valeurs par défaut recommandées:
 
@@ -633,7 +722,7 @@ Mode “session analyse temporaire”:
 
 ---
 
-## 11) Daily research sans spam
+## 12) Daily research sans spam
 
 Script `~/assistant/core/research_daily.sh`:
 
@@ -675,9 +764,9 @@ chmod 700 ~/assistant/core/research_daily.sh
 
 ---
 
-## 12) memU : persistance + mode dégradé
+## 13) memU : persistance + mode dégradé
 
-### 12.1 Checklist preuve de persistance
+### 13.1 Checklist preuve de persistance
 
 1. Écrire une règle (ex: identité admin) dans memU.
 2. Redémarrer runtime:
@@ -688,7 +777,7 @@ systemctl --user restart openclaw-gateway.service
 
 3. Vérifier que la règle est relue après restart (question de contrôle via WhatsApp + vérification des fichiers memU).
 
-### 12.2 Si memU indisponible
+### 13.2 Si memU indisponible
 
 Basculer automatiquement en mode dégradé:
 
@@ -699,7 +788,7 @@ Basculer automatiquement en mode dégradé:
 
 ---
 
-## 13) Permissions et isolation dossiers
+## 14) Permissions et isolation dossiers
 
 Appliquer:
 
@@ -711,73 +800,85 @@ Option `noexec`:
 
 - Possible sur certains montages Linux dédiés.
 - Sous WSL2 standard, c’est souvent limité/non pertinent sur `/home`.
-- Si indisponible: compenser avec `run_safe.sh`, chemins stricts, et séparation runtime/staging.
+- Si indisponible: compenser avec `run_safe.sh`, chemins stricts, séparation runtime/staging, et politique READ/WRITE-ACTION.
 
 ---
 
-## 14) Tests de validation / smoke tests
+## 15) Tests de validation / smoke tests
 
-### 14.1 `run_safe` accepte `git status`
+### 15.1 READ: scan LAN (sans nmap)
 
 ```bash
-mkdir -p ~/assistant/workspaces/demo && cd ~/assistant/workspaces/demo
-git init -q
-~/assistant/core/run_safe.sh git status
+ip neigh || true
+arp -an || cat /proc/net/arp
+for i in 1 10 20; do ping -c 1 -W 1 192.168.1.$i || true; done
 ```
 
-### 14.2 `run_safe` refuse injection `; rm -rf`
+> Si `nmap` est déjà installé, vous pouvez faire un ping sweep LAN en complément.
+
+### 15.2 READ: accès RTSP local (lecture)
 
 ```bash
-~/assistant/core/run_safe.sh git status ';' rm -rf /
+# Exemple avec ffprobe si présent
+ffprobe -v error -rtsp_transport tcp -show_streams rtsp://user:pass@192.168.1.50:554/stream1 || true
+```
+
+### 15.3 READ: requête HTTPS sortante (lecture)
+
+```bash
+curl -I https://api.github.com
+```
+
+### 15.4 WRITE/ACTION: ouverture de port sans approval -> refus
+
+```bash
+~/assistant/core/run_safe.sh nc -l 0.0.0.0 9999
 # attendu: DENY
 ```
 
-### 14.3 staging `fetch -> scan -> promote`
+### 15.5 WRITE/ACTION: ajout destination non allowlist -> demande approval
 
-```bash
-QDIR=$(~/assistant/core/fetch_to_quarantine.sh https://example.com testpkg | awk '{print $2}')
-# si URL exemple inutilisable, remplacer par source réelle interne validée
-~/assistant/core/scan_quarantine.sh "${QDIR#OK: }"
-~/assistant/core/promote_approved.sh "${QDIR#OK: }" proposal-001
+```text
+Tentative: ajouter new-api.example.com à l'egress allowlist
+Attendu: création d'une demande WhatsApp admin + pas d'ajout immédiat
 ```
 
-### 14.4 runtime ne peut pas installer
+### 15.6 WRITE/ACTION: promote sans /approve -> refus
 
-```bash
-~/assistant/core/run_safe.sh npm install left-pad
-# attendu: DENY
+```text
+Tentative: lancer promote_approved.sh sans approval tracée
+Attendu: refus logique orchestrateur + entrée audit DENY
 ```
 
-### 14.5 memU persiste après restart
+### 15.7 Exfiltration: envoi vers domaine non listé -> bloqué + log
 
-```bash
-systemctl --user restart openclaw-gateway.service
-systemctl --user status openclaw-gateway.service --no-pager
-# puis vérifier une donnée memU écrite avant restart
+```text
+Tentative: envoyer un log/image vers un domaine externe non allowlist
+Attendu: blocage + ligne d'audit (destination, horodatage, motif)
 ```
 
 ---
 
-## 15) Mise en production (checklist finale, 10 points max)
+## 16) Mise en production (checklist finale)
 
 1. systemd actif dans WSL2 (PID1 = systemd).
 2. Une seule instance OpenClaw active (`openclaw-gateway.service`).
 3. Dossiers `~/assistant/*` créés et permissions `700` appliquées.
 4. Runner unique `~/assistant/core/run_safe.sh` actif.
-5. Pipeline quarantine -> scan -> promote opérationnel.
-6. WhatsApp canal unique + allowlist admin stricte.
-7. Double confirmation active: `/approve <id>` puis `CONFIRM <id>`.
-8. Audit log actif + rotation hebdo configurée.
-9. Budgets tokens stricts (150k/j, 30k/tâche, stop à 80%).
-10. memU validé (persistance OK) ou mode dégradé activé.
+5. Politique READ libre / WRITE-ACTION contrôlée documentée et appliquée.
+6. Contrôle d’exfiltration (allowlist + audit) en place.
+7. Pipeline quarantine -> scan -> promote opérationnel.
+8. WhatsApp canal unique + allowlist numéros stricte.
+9. Double confirmation active: `/approve <id>` puis `CONFIRM <id>` (ou `ok` explicite sur demande ciblée).
+10. Audit log actif + rotation configurée.
 
 ---
 
-## 16) Exploitation quotidienne (WhatsApp-first, zéro shell au quotidien)
+## 17) Exploitation quotidienne (WhatsApp-first, zéro shell au quotidien)
 
 Une fois installé:
 
 - Vous pilotez via WhatsApp.
-- L’IA peut lire/analyser/préparer en staging.
-- L’IA ne promeut ni n’applique en runtime sans votre approbation explicite.
-- Le shell sert uniquement à l’installation initiale, maintenance planifiée et audit.
+- L’IA lit, analyse, benchmarke, scanne et prépare en staging sans friction.
+- L’IA ne promeut ni n’applique en runtime sans approbation admin explicite.
+- Le shell sert à l’installation initiale, maintenance planifiée et audit.
