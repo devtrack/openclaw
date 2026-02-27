@@ -99,7 +99,7 @@ systemctl is-system-running || true
 ```bash
 sudo apt update
 sudo apt upgrade -y
-sudo apt install -y curl wget ca-certificates jq ripgrep git logrotate coreutils findutils
+sudo apt install -y curl wget ca-certificates jq ripgrep git logrotate coreutils findutils cron util-linux
 ```
 
 ### 2.4 Node 22 + OpenClaw
