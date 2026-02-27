@@ -29,8 +29,8 @@ Rôles:
                                  |
                +-----------------+-----------------+
                |                                   |
-       user commands                       admin commands
-   (lecture / questions)         (/approve, /reject, CONFIRM, "ok")
+       messages utilisateur                  messages admin
+   (lecture / questions)         (autoriser ou refuser l'action)
                |                                   |
                +-----------------+-----------------+
                                  |
