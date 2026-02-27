@@ -3,6 +3,7 @@ import {
   buildAgentMediaPayload,
   buildPendingHistoryContextFromMap,
   clearHistoryEntriesIfEnabled,
+  createScopedPairingAccess,
   DEFAULT_GROUP_HISTORY_LIMIT,
   type HistoryEntry,
   recordPendingHistoryEntryIfEnabled,
@@ -675,6 +676,11 @@ export async function handleFeishuMessage(params: {
 
   try {
     const core = getFeishuRuntime();
+    const pairing = createScopedPairingAccess({
+      core,
+      channel: "feishu",
+      accountId: account.accountId,
+    });
     const shouldComputeCommandAuthorized = core.channel.commands.shouldComputeCommandAuthorized(
       ctx.content,
       cfg,
@@ -683,7 +689,7 @@ export async function handleFeishuMessage(params: {
       !isGroup &&
       dmPolicy !== "allowlist" &&
       (dmPolicy !== "open" || shouldComputeCommandAuthorized)
-        ? await core.channel.pairing.readAllowFromStore("feishu").catch(() => [])
+        ? await pairing.readAllowFromStore().catch(() => [])
         : [];
     const effectiveDmAllowFrom = [...configAllowFrom, ...storeAllowFrom];
     const dmAllowed = resolveFeishuAllowlistMatch({
@@ -695,8 +701,7 @@ export async function handleFeishuMessage(params: {
 
     if (!isGroup && dmPolicy !== "open" && !dmAllowed) {
       if (dmPolicy === "pairing") {
-        const { code, created } = await core.channel.pairing.upsertPairingRequest({
-          channel: "feishu",
+        const { code, created } = await pairing.upsertPairingRequest({
           id: ctx.senderOpenId,
           meta: { name: ctx.senderName },
         });
@@ -943,33 +948,31 @@ export async function handleFeishuMessage(params: {
     });
 
     log(`feishu[${account.accountId}]: dispatching to agent (session=${route.sessionKey})`);
-    try {
-      const { queuedFinal, counts } = await core.channel.reply.dispatchReplyFromConfig({
-        ctx: ctxPayload,
-        cfg,
-        dispatcher,
-        replyOptions,
-      });
-
-      if (isGroup && historyKey && chatHistories) {
-        clearHistoryEntriesIfEnabled({
-          historyMap: chatHistories,
-          historyKey,
-          limit: historyLimit,
-        });
-      }
-
-      log(
-        `feishu[${account.accountId}]: dispatch complete (queuedFinal=${queuedFinal}, replies=${counts.final})`,
-      );
-    } finally {
-      dispatcher.markComplete();
-      try {
-        await dispatcher.waitForIdle();
-      } finally {
+    const { queuedFinal, counts } = await core.channel.reply.withReplyDispatcher({
+      dispatcher,
+      onSettled: () => {
         markDispatchIdle();
-      }
+      },
+      run: () =>
+        core.channel.reply.dispatchReplyFromConfig({
+          ctx: ctxPayload,
+          cfg,
+          dispatcher,
+          replyOptions,
+        }),
+    });
+
+    if (isGroup && historyKey && chatHistories) {
+      clearHistoryEntriesIfEnabled({
+        historyMap: chatHistories,
+        historyKey,
+        limit: historyLimit,
+      });
     }
+
+    log(
+      `feishu[${account.accountId}]: dispatch complete (queuedFinal=${queuedFinal}, replies=${counts.final})`,
+    );
   } catch (err) {
     error(`feishu[${account.accountId}]: failed to dispatch message: ${String(err)}`);
   }
