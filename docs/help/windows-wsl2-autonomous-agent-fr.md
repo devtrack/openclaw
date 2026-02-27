@@ -268,7 +268,7 @@ is_allowed_path() {
   local p
   p="$(realpath -m "$1")"
   case "$p" in
-    "$BASE/runtime"/*|"$BASE/workspaces"/*|"$BASE/logs"/*|"$BASE/approved"/*)
+    "$BASE/runtime"/*|"$BASE/workspaces"/*|"$BASE/logs"/*|"$BASE/approved"/*|"$BASE/quarantine"/*)
       return 0
       ;;
     *)
@@ -313,12 +313,46 @@ case "$cmd" in
     case "$sub" in
       status|diff)
         ;;
+      clone)
+        # Exige --depth 1 (shallow clone); destination validée par is_allowed_path (quarantine)
+        depth_ok=0
+        prev_a=""
+        for flag in "$@"; do
+          [[ "$flag" == "--depth=1" ]] && depth_ok=1
+          [[ "$prev_a" == "--depth" && "$flag" == "1" ]] && depth_ok=1
+          prev_a="$flag"
+        done
+        unset prev_a flag
+        if [[ $depth_ok -eq 0 ]]; then
+          log_event "DENY" "git clone requires --depth 1"
+          echo "DENY: git clone requires --depth 1"
+          exit 126
+        fi
+        # Bloquer les flags pouvant déclencher une exécution arbitraire (formes --flag et --flag=val)
+        for flag in "$@"; do
+          case "$flag" in
+            --upload-pack*|--exec*|--recurse-submodules*|--jobs*|-j)
+              log_event "DENY" "git clone flag forbidden: $flag"
+              echo "DENY: git clone flag not allowed: $flag"
+              exit 126
+              ;;
+          esac
+        done
+        unset flag
+        TIMEOUT_SEC="120s"
+        ;;
       *)
         log_event "DENY" "git subcommand forbidden: ${sub:-<none>}"
-        echo "DENY: only git status|diff"
+        echo "DENY: only git status|diff|clone --depth 1"
         exit 126
         ;;
     esac
+    ;;
+  # Fetch READ-only vers quarantine.
+  # Les chemins de sortie (-o/-O/-P) sont validés par la boucle is_allowed_path ci-dessous,
+  # avant tout exec; redirections shell bloquées par contains_forbidden_tokens.
+  curl|wget)
+    TIMEOUT_SEC="60s"
     ;;
   rg|jq|cat|head|tail|sed|awk|ls|pwd|ping|ip|arp)
     ;;
