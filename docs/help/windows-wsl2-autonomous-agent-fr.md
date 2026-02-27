@@ -343,7 +343,7 @@ else
   exit 2
 fi
 
-sha256sum $(find "$DEST" -type f | sort) > "$DEST/SHA256SUMS"
+find "$DEST" -type f -print0 | sort -z | xargs -0 sha256sum > "$DEST/SHA256SUMS"
 
 echo "source=$SRC" > "$DEST/FETCH.meta"
 echo "fetched_at=$(date -Is)" >> "$DEST/FETCH.meta"
