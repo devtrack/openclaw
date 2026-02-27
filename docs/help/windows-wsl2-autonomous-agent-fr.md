@@ -105,7 +105,7 @@ systemctl is-system-running || true
 ```bash
 sudo apt update
 sudo apt upgrade -y
-sudo apt install -y curl wget ca-certificates jq ripgrep git logrotate coreutils findutils cron util-linux iputils-ping net-tools
+sudo apt install -y curl wget ca-certificates jq ripgrep git logrotate coreutils findutils cron util-linux iputils-ping net-tools lsof
 ```
 
 > `nmap` n’est pas obligatoire. Si vous l’avez déjà, utilisez-le. Sinon, utilisez `ping`, `arp -an`, `/proc/net/arp`, ou `ip neigh`.
